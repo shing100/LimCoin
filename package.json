@@ -1,0 +1,13 @@
+{
+  "name": "LimCoin",
+  "version": "1.0.0",
+  "description": "LimCoin, the coin made in NodeJS",
+  "main": "src/server.js",
+  "repository": "https://github.com/shing100/LimCoin",
+  "license": "MIT",
+  "private": false,
+  "dependencies": {
+    "crypto": "^1.0.1",
+    "js": "^0.1.0"
+  }
+}
