@@ -1,2 +1,2 @@
 # LimCoin
-LimCoin, the first coin made in NodeJS
+LimCoin, the coin made in NodeJS
