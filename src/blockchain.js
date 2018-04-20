@@ -35,7 +35,7 @@ const createHash = (index, previousHash, timestamp, data) => CryptoJS.SHA256(ind
 const createNewBlock = data => {
   const previousBlock = getLastBlock();
   const newBlockIndex = previousBlock.index + 1;
-  const newTimestamp = getTimeStamp();
+  const newTimestamp = getTimestamp();
   const newHash = createHash(
     newBlockIndex,
     previousBlock.hash,
