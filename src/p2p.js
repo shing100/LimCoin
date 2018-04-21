@@ -104,7 +104,9 @@ const handleBlockchainResponse = receivedBlocks => {
   const newestBlock = getNewestBlock();
   if(latestBlockReceived.index > newestBlock.index){
     if(newestBlock.hash === latestBlockReceived.previousHash){
-      addBlockToChain(latestBlockReceived);
+      if(addBlockToChain(latestBlockReceived)) {
+        broadcastNewBlock();
+      }
     }else if(receivedBlocks.length === 1){
       sendMessageToAll(getAll());
     }else{
@@ -117,9 +119,11 @@ const sendMessage = (ws, message) => ws.send(JSON.stringify(message));
 
 const sendMessageToAll = message => sockets.forEach(ws => sendMessage(ws, message));
 
-const responseLatest = () => blockchainResponse([getNewestBlock()])
+const responseLatest = () => blockchainResponse([getNewestBlock()]);
 
 const responseAll = () => blockchainResponse(getBlockChain());
+
+const broadcastNewBlock = () => sendMessageToAll(responseLatest());
 
 const handleSocketError = ws => {
   const closeSocketConnetion = ws => {
@@ -133,5 +137,6 @@ const handleSocketError = ws => {
 
 module.exports = {
   startP2PServer,
-  connectToPeers
+  connectToPeers,
+  broadcastNewBlock
 };
