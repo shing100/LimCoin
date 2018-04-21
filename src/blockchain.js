@@ -20,10 +20,6 @@ const genesisBlock = new Block(
 
 let blockchain = [genesisBlock];
 
-// function getLastBlock() {
-//   return blockchain[blockchain.length-1];
-// }
-
 const getNewestBlock = () => blockchain[blockchain.length - 1];
 
 const getTimestamp = () => new Date().getTime() / 1000;
