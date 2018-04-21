@@ -1,7 +1,7 @@
 const WebSockets = require('ws'),
   Blockchain = require('./blockchain');
 
-const { getLastBlock } = Blockchain;
+const { getNewestBlock, isBlockStructureValid, replaceChain } = Blockchain;
 
 const sockets = [];
 
@@ -89,7 +89,7 @@ const handleSocketMessages = ws => {
 };
 
 const handleBlockchainResponse = receivedBlocks => {
-  if(receivedBlocks.length ==  0){
+  if(receivedBlocks.length === 0){
     console.log("Received blocks have a length of 0");
     return;
   }
@@ -98,11 +98,21 @@ const handleBlockchainResponse = receivedBlocks => {
     console.log("The block structure of the block received is not valid");
     return;
   }
+  const newestBlock = getNewestBlock();
+  if(latestBlockReceived.index > newestBlock.index){
+    if(newestBlock.hash === latestBlockReceived.previousHash){
+      addBlockToChain(latestBlockReceived);
+    }else if(receivedBlocks.length === 1){
+      // replace get all the blocks
+    }else{
+      replaceChain(receivedBlocks);
+    }
+  }
 };
 
 const sendMessage = (ws, message) => ws.send(JSON.stringify(message));
 
-const responseLatest = () => blockchainResponse([getLastBlock()])
+const responseLatest = () => blockchainResponse([getNewestBlock()])
 
 const handleSocketError = ws => {
   const closeSocketConnetion = ws => {
