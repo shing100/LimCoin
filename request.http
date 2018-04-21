@@ -6,3 +6,5 @@ Content-Type: application/json
 {
   "data":"Second block"
 }
+
+POST http://localhost

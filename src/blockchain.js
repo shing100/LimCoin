@@ -93,7 +93,7 @@ const isChainValid = (candidateChain) => {
       return false;
     };
     for(let i=1; i<candidateChain.length; i++){
-      if(!isBlockValid(candidateChain[i], candidateChain[i]-1)){
+      if(!isBlockValid(candidateChain[i], candidateChain[i-1])){
         return false;
       }
     }
