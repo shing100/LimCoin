@@ -5,7 +5,6 @@ const { getNewestBlock, isBlockStructureValid, replaceChain, getBlockChain, addB
 
 const sockets = [];
 
-
 // Message Type
 const GET_LATEST = "GET_LATEST";
 const GET_ALL = "GET_ALL";
@@ -133,7 +132,6 @@ const handleSocketError = ws => {
   ws.on("close", () => closeSocketConnetion(ws));
   ws.on("error", () => closeSocketConnetion(ws));
 }
-
 
 module.exports = {
   startP2PServer,
