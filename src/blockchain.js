@@ -3,6 +3,7 @@ const CryptoJS = require("crypto-js"),
 
 const BlOCK_GENERATION_INTERVAL = 10;
 const DIFFICULTY_ADJUSMENT_INTERVAL = 10;
+const TIMESTAMP_MINIT = 60;
 
 class Block{
   constructor(index, hash, previousHash, timestamp, data, difficulty, nonce){
@@ -20,9 +21,9 @@ const genesisBlock = new Block(
   0,
   "D0124ED72DDCF46D7493B291D7101BF06564FE0CC54544633CA8D75AA6E456A5",
   null,
-  1524220929129,
+  1524382524,
   "This is the Genesis!",
-  0,
+  12,
   0
 );
 
@@ -30,7 +31,7 @@ let blockchain = [genesisBlock];
 
 const getNewestBlock = () => blockchain[blockchain.length - 1];
 
-const getTimestamp = () => new Date().getTime() / 1000;
+const getTimestamp = () => Math.round(new Date().getTime() / 1000);
 
 const getBlockChain = () => blockchain;
 
@@ -104,6 +105,10 @@ const hashMatchesDifficulty = (hash, difficulty) => {
   return hashInBinary.startsWith(requiredZeros);
 }
 
+const isTimeStampValid = (newBlock, oldBlock) => {
+  return (oldBlock.timestamp - TIMESTAMP_MINIT < newBlock.timestamp && newBlock.timestamp - TIMESTAMP_MINIT < getTimestamp())
+}
+
 const getBlockHash = block => createHash(block.index, block.previousHash, block.timestamp, block.data, block.difficulty, block.nonce);
 
 const isBlockValid = (candidateBlock, latestBlock) => {
@@ -119,6 +124,8 @@ const isBlockValid = (candidateBlock, latestBlock) => {
   }else if(getBlockHash(candidateBlock) !== candidateBlock.hash) {
     console.log('The hash of this block is invalid')
     return false;
+  }else if(!isTimeStampValid(candidateBlock, latestBlock)) {
+    console.log("The timestamp of this block is invalid");
   }
   return true;
 };
