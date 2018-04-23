@@ -32,6 +32,7 @@ const blockchainResponse = (data) => {
   }
 }
 
+// 소켓 가져오기
 const getSockets = () => sockets;
 
 const startP2PServer = server => {
@@ -49,6 +50,7 @@ const connectToPeers = newPeer => {
   });
 };
 
+// 웹 소켓 연결하기
 const initSocketConnection = ws => {
   sockets.push(ws);
   handleSocketMessages(ws);
@@ -56,6 +58,7 @@ const initSocketConnection = ws => {
   sendMessage(ws, getLatest());
 };
 
+// 데이터 JSON 변환
 const parseData = data => {
   try {
     return JSON.parse(data);
@@ -65,6 +68,7 @@ const parseData = data => {
   }
 }
 
+// 소켓 핸들러
 const handleSocketMessages = ws => {
   ws.on("message", data => {
     const message = parseData(data);
@@ -74,10 +78,10 @@ const handleSocketMessages = ws => {
     console.log(message);
     switch (message.type) {
       case GET_LATEST:
-        sendMessage(ws, responseLatest());
+        sendMessage(ws, responseLatest());  // 가장 최근
         break;
       case GET_ALL:
-        sendMessage(ws, responseAll());
+        sendMessage(ws, responseAll());  // 모든
         break;
       case BLOCKCHAIN_RESPONSE:
         const receivedBlocks = message.data;
@@ -90,6 +94,7 @@ const handleSocketMessages = ws => {
   });
 };
 
+// 블록체인응답 핸들러
 const handleBlockchainResponse = receivedBlocks => {
   if(receivedBlocks.length === 0){
     console.log("Received blocks have a length of 0");
@@ -114,16 +119,17 @@ const handleBlockchainResponse = receivedBlocks => {
   }
 };
 
+// JSON 메세지 보내기 to WS
 const sendMessage = (ws, message) => ws.send(JSON.stringify(message));
-
+// 모두에게 보내기
 const sendMessageToAll = message => sockets.forEach(ws => sendMessage(ws, message));
-
+// 최근 블록체인 가져오기
 const responseLatest = () => blockchainResponse([getNewestBlock()]);
-
+// 모든 블록체인 가져오기
 const responseAll = () => blockchainResponse(getBlockChain());
-
+// 모두에게 블록 알리기
 const broadcastNewBlock = () => sendMessageToAll(responseLatest());
-
+// 에러 체크
 const handleSocketError = ws => {
   const closeSocketConnetion = ws => {
     ws.close();

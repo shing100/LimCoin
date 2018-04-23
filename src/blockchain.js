@@ -56,7 +56,7 @@ const createNewBlock = data => {
   require("./p2p").broadcastNewBlock();
   return newBlock;
 }
-
+// 블록 난이도 찾기
 const findDifficulty = () => {
   const newestBlock = getNewestBlock();
   if(newestBlock.index % DIFFICULTY_ADJUSMENT_INTERVAL === 0 && newestBlock.index !== 0) {
@@ -65,7 +65,7 @@ const findDifficulty = () => {
     return newestBlock.difficulty;
   }
 }
-
+// 난이도 계산기
 const calculateNewDifficulty = (newestBlock, blockchain) => {
   const lastCalculatedBlock = blockchain[blockchain.length - DIFFICULTY_ADJUSMENT_INTERVAL];
   const timeExpected = BlOCK_GENERATION_INTERVAL * DIFFICULTY_ADJUSMENT_INTERVAL;
@@ -97,20 +97,20 @@ const findBlock = (index, previousHash, timestamp, data, difficulty) => {
       nonce++
     }
 };
-
-const hashMatchesDifficulty = (hash, difficulty) => {
+// 난이도
+const hashMatchesDifficulty = (hash, difficulty = 10) => {
   const hashInBinary = hexToBinary(hash);
   const requiredZeros = "0".repeat(difficulty);
   console.log('Trying difficulty:',difficulty,'with hash', hash);
   return hashInBinary.startsWith(requiredZeros);
 }
-
+// 타임스탬프 유효성 검사
 const isTimeStampValid = (newBlock, oldBlock) => {
   return (oldBlock.timestamp - TIMESTAMP_MINIT < newBlock.timestamp && newBlock.timestamp - TIMESTAMP_MINIT < getTimestamp())
 }
-
+// 헤시 만들기
 const getBlockHash = block => createHash(block.index, block.previousHash, block.timestamp, block.data, block.difficulty, block.nonce);
-
+// 블록 유효성 체크하기
 const isBlockValid = (candidateBlock, latestBlock) => {
   if(!isBlockStructureValid(candidateBlock)){
     console.log('The candidate block structure is not valid');
@@ -129,18 +129,20 @@ const isBlockValid = (candidateBlock, latestBlock) => {
   }
   return true;
 };
-
+// 블록 유효성 체크
 const isBlockStructureValid = (block) => {
   return (
     typeof block.index === 'number' &&
     typeof block.hash === 'string' &&
     typeof block.previousHash === 'string' &&
     typeof block.timestamp === 'number' &&
-    typeof block.data === 'string'
+    typeof block.data === 'string' &&
+    typeof block.difficulty === 'number' &&
+    typeof block.nonce === 'number'
   );
 };
 
-
+// 블록체인 유효성 검사하기
 const isChainValid = (candidateChain) => {
     const isGenesisValid = block => {
       return JSON.stringify(block) === JSON.stringify(genesisBlock);
@@ -156,17 +158,25 @@ const isChainValid = (candidateChain) => {
     };
     return true;
 };
-
-
+// 난이도 구분하기
+const sumDifficulty = anyBlockchain =>
+  anyBlockchain
+    .map(block => block.difficulty)
+    .map(difficulty => Math.pow(2,difficulty))
+    .reduce((a,b) => a + b);
+// 블록체인 재배치
 const replaceChain = candidateChain => {
-  if(isChainValid(candidateChain) && candidateChain.length > getBlockChain().length){
+  if(
+    isChainValid(candidateChain) &&
+    sumDifficulty(candidateChain) > sumDifficulty(getBlockChain())
+  ){
     blockchain = candidateChain;
     return true;
   }else{
     return false;
   }
 };
-
+// 블록 체인 더하기
 const addBlockToChain = candidateBlock => {
   if(isBlockValid(candidateBlock, getNewestBlock())){
     getBlockChain().push(candidateBlock);
