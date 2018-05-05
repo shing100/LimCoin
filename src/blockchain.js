@@ -1,5 +1,8 @@
 const CryptoJS = require("crypto-js"),
+  Wallet = require("./wallet"),
   hexToBinary = require("hex-to-binary");
+
+const { getBalance, getPublicFromWallet } = Wallet;
 
 const BlOCK_GENERATION_INTERVAL = 10;
 const DIFFICULTY_ADJUSMENT_INTERVAL = 10;
@@ -28,6 +31,8 @@ const genesisBlock = new Block(
 );
 
 let blockchain = [genesisBlock];
+
+let uTxOuts = [];
 
 const getNewestBlock = () => blockchain[blockchain.length - 1];
 
@@ -101,7 +106,7 @@ const findBlock = (index, previousHash, timestamp, data, difficulty) => {
 const hashMatchesDifficulty = (hash, difficulty = 10) => {
   const hashInBinary = hexToBinary(hash);
   const requiredZeros = "0".repeat(difficulty);
-  console.log('Trying difficulty:',difficulty,'with hash', hash);
+  //console.log('Trying difficulty:',difficulty,'with hash', hash);
   return hashInBinary.startsWith(requiredZeros);
 }
 // 타임스탬프 유효성 검사
@@ -186,11 +191,14 @@ const addBlockToChain = candidateBlock => {
   }
 };
 
+const getAccountBalance = () => getBalance(getPublicFromWallet(), uTxOuts);
+
 module.exports = {
   replaceChain,
   addBlockToChain,
   isBlockStructureValid,
   getNewestBlock,
   getBlockChain,
-  createNewBlock
+  createNewBlock,
+  getAccountBalance
 };

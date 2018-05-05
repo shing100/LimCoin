@@ -210,7 +210,7 @@ const validateCoinbaseTx = (tx, blockIndex) => {
   }
 }
 
-moudule.exports = {
+module.exports = {
   getPublicKey,
   getTxId,
   signTxIn,
