@@ -14,8 +14,8 @@ class TxOut {
 };
 
 class TxIn {
-  // uTxOutId
-  // uTxOutIndex
+  // TxOutId
+  // TxOutIndex
   // Signature
 };
 
@@ -51,19 +51,29 @@ const findUTxOut = (txOutId, txOutIndex, uTxOutList) => {
   return uTxOutList.find(uTxO => uTxO.txOutId === uTxOutId && uTxO.txOutIndex === txOutIndex);
 };
 
-const signTxIn = (tx, txInIndex, privateKey, uTxOut) => {
+const signTxIn = (tx, txInIndex, privateKey, uTxOutList) => {
   const txIn = tx.txIns[txInIndex];
   const dataToSign = tx.id;
   // find Tx
-  const referencedUTxOut = findUTxOut(txIn.txOutId, tx.txOutIndex, uTxOuts);
+  const referencedUTxOut = findUTxOut(txIn.txOutId, tx.txOutIndex, uTxOutList);
   if(referencedUTxOut === null){
     console.log("Couldn't not find the referenced uTxOut");
     return;
+  }
+  // 주소 검증하기
+  const referencedAddress = referencedUTxOut.address;
+  if(getPublicKey(privateKey) !== referencedAddress){
+    return false;
   }
   const key = ec.keyFromPrivate(privateKey, "hex");
   const signature = tuils.toHexString(key.sign(dataToSign).toDER());
   return signature;
 };
+
+//공개키 얻어오기
+const getPublicKey = (privateKey) => {
+  return ec.keyFromPrivate(privateKey, "hex").getPublic().encode("hex");
+}
 
 const updateUTxOuts = (newTxs, uTxOutList) => {
   const newUTxOuts = newTxs.map(tx => {
@@ -198,4 +208,13 @@ const validateCoinbaseTx = (tx, blockIndex) => {
   }else {
     return true;
   }
+}
+
+moudule.exports = {
+  getPublicKey,
+  getTxId,
+  signTxIn,
+  TxIn,
+  Transaction,
+  TxOut
 }
