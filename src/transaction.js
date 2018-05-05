@@ -57,6 +57,7 @@ const signTxIn = (tx, txInIndex, privateKey, uTxOut) => {
   // find Tx
   const referencedUTxOut = findUTxOut(txIn.txOutId, tx.txOutIndex, uTxOuts);
   if(referencedUTxOut === null){
+    console.log("Couldn't not find the referenced uTxOut");
     return;
   }
   const key = ec.keyFromPrivate(privateKey, "hex");
