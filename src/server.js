@@ -18,8 +18,7 @@ app.use(morgan("combined"));
 app.route("/blocks").get((req, res) => {
   res.send(getBlockChain());
 }).post((req, res) => {
-  const { body: { data } } = req;
-  const newBlock = createNewBlock(data);
+  const newBlock = createNewBlock();
   res.send(newBlock);
 });
 
