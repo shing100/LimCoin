@@ -1,5 +1,6 @@
 const CryptoJS = require("crypto-js"),
   elliptic = require('elliptic'),
+  _ = require("lodash"),
   utils = require("./utils");
 
 const ec = new elliptic.ec("secp256k1");
@@ -48,7 +49,7 @@ const getTxId = tx => {
 };
 
 const findUTxOut = (txOutId, txOutIndex, uTxOutList) => {
-  return uTxOutList.find(uTxO => uTxO.txOutId === uTxOutId && uTxO.txOutIndex === txOutIndex);
+  return uTxOutList.find(uTxO => uTxO.txOutId === txOutId && uTxO.txOutIndex === txOutIndex);
 };
 
 const signTxIn = (tx, txInIndex, privateKey, uTxOutList) => {
@@ -76,11 +77,12 @@ const getPublicKey = (privateKey) => {
 }
 
 const updateUTxOuts = (newTxs, uTxOutList) => {
-  const newUTxOuts = newTxs.map(tx => {
-    tx.txOuts.map((txOut, index) => {
-          new UtxOut(tx.id, index, txOut.address, txOut.amount);
-      });
-  })
+  const newUTxOuts = newTxs
+    .map(tx =>
+      tx.txOuts.map(
+        (txOut, index) => new UTxOut(tx.id, index, txOut.address, txOut.amount)
+      )
+  )
   .reduce((a, b) => a.concat(b), []);
 
   const spentTxOuts = newTxs
@@ -214,12 +216,58 @@ const createCoinbaseTx = (address, blockIndex) => {
   const tx = new Transaction();
   const txIn = new TxIn();
   txIn.signature  = "";
-  txIn.txOutId = blockIndex;
+  txIn.txOutId = "";
+  txIn.txOutIndex = blockIndex;
   tx.txIns = [txIn];
   tx.txOuts = [new TxOut(address, COINBASE_AMOUNT)];
   tx.id = getTxId(tx);
   return tx;
 };
+
+const hasDuplicates = txIns => {
+  const groups = _.countBy(txIns, txIn => txIn.txOutId + txIn.txOutIndex);
+
+  return _(groups)
+    .map(value => {
+      if(value > 1){
+        console.log("Found a duplicated txIn");
+        return true;
+      }else{
+        return false;
+      }
+    })
+    .includes(true);
+};
+
+const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
+  const coinbaseTx = txs[0];
+  if(!validateCoinbaseTx(coinbaseTx, blockIndex)){
+    console.log("Coinbase Tx is invalid");
+  }
+
+  const txIns = _(txs)
+    .map(tx => tx.txIns)
+    .flatten()
+    .value();
+
+  if(hasDuplicates(txIns)){
+    console.log("Found duplicated txIns");
+    return false;
+  }
+
+  const nonCoinbaseTxs = txs.slice(1);
+
+  return nonCoinbaseTxs
+    .map(tx => validateTx(tx, uTxOutList))
+    .reduce((a, b) => a + b, true);
+}
+
+const processTxs = (txs, uTxOutList, blockIndex) => {
+  if(!validateBlockTxs(txs, uTxOutList, blockIndex)){
+    return null;
+  }
+  return updateUTxOuts(txs, uTxOutList);
+}
 
 module.exports = {
   getPublicKey,
@@ -228,5 +276,6 @@ module.exports = {
   TxIn,
   Transaction,
   TxOut,
-  createCoinbaseTx
+  createCoinbaseTx,
+  processTxs
 }

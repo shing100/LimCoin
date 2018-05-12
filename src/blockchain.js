@@ -5,7 +5,7 @@ const CryptoJS = require("crypto-js"),
 
 const { getBalance, getPublicFromWallet } = Wallet;
 
-const { createCoinbaseTx } = Transactions;
+const { createCoinbaseTx, processTxs } = Transactions;
 
 const BlOCK_GENERATION_INTERVAL = 10;
 const DIFFICULTY_ADJUSMENT_INTERVAL = 10;
@@ -195,7 +195,19 @@ const replaceChain = candidateChain => {
 // 블록 체인 더하기
 const addBlockToChain = candidateBlock => {
   if(isBlockValid(candidateBlock, getNewestBlock())){
-    getBlockChain().push(candidateBlock);
+    const processedTxs = processTxs(
+      candidateBlock.data,
+      uTxOuts,
+      candidateBlock.blockIndex
+    );
+    if(processedTxs === null){
+      console.log("Couldnt process txs");
+      return false;
+    }else{
+        getBlockChain().push(candidateBlock);
+        uTxOuts = processedTxs;
+        return true;
+    }
     return true;
   }else{
     return false;
