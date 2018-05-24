@@ -53,7 +53,7 @@ const findAmountInUTxOuts = (amountNeeded, myUTxOuts) => {
       return { includedUTxOuts, leftOverAmount };
     }
   }
-  console.log("Not enough founds");
+  throw Error("Not enough founds");
   return false;
 };
 
@@ -81,6 +81,7 @@ const createTx = (receiverAddress, amount, privateKey, uTxOutList) => {
     txIn.txOutId = uTxOut.txOutId;
     // tx
     txIn.txOutIndex = uTxOut.txOutIndex;
+    return txIn;
   }
 
   const unsignedTxIns = includedUTxOuts.map(toUnsignedTxIn);
@@ -101,5 +102,7 @@ const createTx = (receiverAddress, amount, privateKey, uTxOutList) => {
 module.exports = {
   initWallet,
   getBalance,
-  getPublicFromWallet
+  getPublicFromWallet,
+  createTx,
+  getPrivateFromWallet
 }
