@@ -63,7 +63,7 @@ const createTxOuts = (receiverAddress, myAddress, amount, leftOverAmount) => {
     return [receiverTxOut];
   }else{
     const leftOverTxOut = new TxOut(myAddress, leftOverAmount);
-    return [receiverTxOut, leftOverAmount];
+    return [receiverTxOut, leftOverTxOut];
   }
 }
 
@@ -79,7 +79,6 @@ const createTx = (receiverAddress, amount, privateKey, uTxOutList) => {
   const toUnsignedTxIn = uTxOut => {
     const txIn = new TxIn();
     txIn.txOutId = uTxOut.txOutId;
-    // tx
     txIn.txOutIndex = uTxOut.txOutIndex;
     return txIn;
   }

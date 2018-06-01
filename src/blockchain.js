@@ -1,7 +1,7 @@
 const CryptoJS = require("crypto-js"),
   _ = require("lodash"),
   Wallet = require("./wallet"),
-  MemPool = require("./memPool"),
+  Mempool = require("./mempool"),
   Transactions = require("./Transactions"),
   hexToBinary = require("hex-to-binary");
 
@@ -9,7 +9,7 @@ const { getBalance, getPublicFromWallet, createTx, getPrivateFromWallet } = Wall
 
 const { createCoinbaseTx, processTxs } = Transactions;
 
-const { addToMempool, getMempool} = MemPool;
+const { addToMempool, getMempool} = Mempool;
 
 const BlOCK_GENERATION_INTERVAL = 10;
 const DIFFICULTY_ADJUSMENT_INTERVAL = 10;

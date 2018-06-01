@@ -31,7 +31,7 @@ const isTxValidForPool = (tx, mempool) => {
   return true;
 }
 
-const addToMempool = (tx, uTxOutList) = {
+const addToMempool = (tx, uTxOutList) => {
   if(!validateTx(tx, uTxOutList)){
     throw Error("This Tx is invalid. Will not add it to Pool");
   } else if(!isTxValidForPool(tx, mempool)){
