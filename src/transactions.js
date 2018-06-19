@@ -5,7 +5,7 @@ const CryptoJS = require("crypto-js"),
 
 const ec = new elliptic.ec("secp256k1");
 
-const COINBASE_AMOUNT = 50;
+const COINBASE_AMOUNT = 10;
 
 class TxOut {
   constructor(address, amount) {
