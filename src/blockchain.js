@@ -119,7 +119,7 @@ const findBlock = (index, previousHash, timestamp, data, difficulty) => {
     }
 };
 // 난이도
-const hashMatchesDifficulty = (hash, difficulty = 10) => {
+const hashMatchesDifficulty = (hash, difficulty = 15) => {
   const hashInBinary = hexToBinary(hash);
   const requiredZeros = "0".repeat(difficulty);
   //console.log('Trying difficulty:',difficulty,'with hash', hash);
