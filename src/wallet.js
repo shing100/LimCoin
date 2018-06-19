@@ -53,7 +53,7 @@ const findAmountInUTxOuts = (amountNeeded, myUTxOuts) => {
       return { includedUTxOuts, leftOverAmount };
     }
   }
-  console.log("Not enough founds");
+  throw Error("Not enough founds");
   return false;
 };
 
@@ -63,17 +63,41 @@ const createTxOuts = (receiverAddress, myAddress, amount, leftOverAmount) => {
     return [receiverTxOut];
   }else{
     const leftOverTxOut = new TxOut(myAddress, leftOverAmount);
-    return [receiverTxOut, leftOverAmount];
+    return [receiverTxOut, leftOverTxOut];
   }
 }
 
-const createTx = (receiverAddress, amount, privateKey, uTxOutList) => {
+const filterUTxOutsFromMempool = (uTxOutList, mempool) => {
+  const txIns = _(mempool)
+    .map(tx => tx.txIns)
+    .flatten()
+    .value();
+
+  const removables = [];
+
+  for (const uTxOut of uTxOutList) {
+    const txIn = _.find(
+      txIns,
+      txIn =>
+        txIn.txOutIndex === uTxOut.txOutIndex && txIn.txOutId === uTxOut.txOutId
+    );
+    if (!txIn === undefined) {
+      removables.push(uTxOut);
+    }
+  }
+
+  return _.without(uTxOutList, ...removables);
+};
+
+const createTx = (receiverAddress, amount, privateKey, uTxOutList, memPool) => {
   const myAddress = getPublicKey(privateKey);
   const myUTxOuts = uTxOutList.filter(uTxO => uTxO.address === myAddress);
 
+  const filteredUTxOuts = filterUTxOutsFromMempool(myUTxOuts, memPool);
+
   const { includedUTxOuts, leftOverAmount } = findAmountInUTxOuts(
     amount,
-    myUTxOuts
+    filteredUTxOuts
   );
 
   const toUnsignedTxIn = uTxOut => {
@@ -81,6 +105,7 @@ const createTx = (receiverAddress, amount, privateKey, uTxOutList) => {
     txIn.txOutId = uTxOut.txOutId;
     // tx
     txIn.txOutIndex = uTxOut.txOutIndex;
+    return txIn;
   }
 
   const unsignedTxIns = includedUTxOuts.map(toUnsignedTxIn);
@@ -101,5 +126,7 @@ const createTx = (receiverAddress, amount, privateKey, uTxOutList) => {
 module.exports = {
   initWallet,
   getBalance,
-  getPublicFromWallet
+  getPublicFromWallet,
+  createTx,
+  getPrivateFromWallet
 }

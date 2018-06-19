@@ -38,13 +38,9 @@ class UTxOut {
 const uTxOuts = [];
 
 const getTxId = tx => {
-  const txInContent = tx.txIns
-    .map(txIn => txIn.uTxOutId + txIn.uTxOutIndex)
-    .reduce((a, b) => a + b, "");
+  const txInContent = tx.txIns.map(txIn => txIn.uTxOutId + txIn.uTxOutIndex).reduce((a, b) => a + b, "");
 
-  const txOutContent = tx.txOuts
-    .map(txOut => txOut.address + txOut.amount)
-    .reduce((a, b) => a + b, "");
+  const txOutContent = tx.txOuts.map(txOut => txOut.address + txOut.amount).reduce((a, b) => a + b, "");
   return CryptoJS.SHA256(txInContent + txOutContent).toString();
 };
 
@@ -56,9 +52,9 @@ const signTxIn = (tx, txInIndex, privateKey, uTxOutList) => {
   const txIn = tx.txIns[txInIndex];
   const dataToSign = tx.id;
   // find Tx
-  const referencedUTxOut = findUTxOut(txIn.txOutId, tx.txOutIndex, uTxOutList);
-  if(referencedUTxOut === null){
-    console.log("Couldn't not find the referenced uTxOut");
+  const referencedUTxOut = findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOutList);
+  if(referencedUTxOut === null || referencedUTxOut === undefined){
+    throw Error("Couldn't not find the referenced uTxOut or not signing");
     return;
   }
   // 주소 검증하기
@@ -67,7 +63,7 @@ const signTxIn = (tx, txInIndex, privateKey, uTxOutList) => {
     return false;
   }
   const key = ec.keyFromPrivate(privateKey, "hex");
-  const signature = tuils.toHexString(key.sign(dataToSign).toDER());
+  const signature = utils.toHexString(key.sign(dataToSign).toDER());
   return signature;
 };
 
@@ -77,21 +73,14 @@ const getPublicKey = (privateKey) => {
 }
 
 const updateUTxOuts = (newTxs, uTxOutList) => {
-  const newUTxOuts = newTxs
-    .map(tx =>
-      tx.txOuts.map(
+  const newUTxOuts = newTxs.map(tx => tx.txOuts.map(
         (txOut, index) => new UTxOut(tx.id, index, txOut.address, txOut.amount)
       )
-  )
-  .reduce((a, b) => a.concat(b), []);
+  ).reduce((a, b) => a.concat(b), []);
 
-  const spentTxOuts = newTxs
-  .map(tx => tx.txIns)
-  .reduce((a, b) => a.concat(b), [])
-  .map(txIn => new UTxOut(txIn.txOutId, txIn.txOutIndex, "", 0));
+  const spentTxOuts = newTxs.map(tx => tx.txIns).reduce((a, b) => a.concat(b), []).map(txIn => new UTxOut(txIn.txOutId, txIn.txOutIndex, "", 0));
 
-  const resultingUTxOuts = uTxOutList.filter(uTxO => !findUTxOut(uTxO.txOutId, uTxO.txOutIndex, spentTxOuts))
-  .concat(newUTxOuts);
+  const resultingUTxOuts = uTxOutList.filter(uTxO => !findUTxOut(uTxO.txOutId, uTxO.txOutIndex, spentTxOuts)).concat(newUTxOuts);
 
   return resultingUTxOuts;
 };
@@ -136,6 +125,8 @@ const isTxOutStructureValid = txOut => {
   }
 }
 
+
+// 구조체 검증
 const isTxStructureValid = tx => {
   if(typeof tx.id !== "string"){
     console.log("Tx id is not valid");
@@ -157,6 +148,7 @@ const isTxStructureValid = tx => {
   }
 }
 
+// TX 인풋
 const validateTxIn = (txIn, tx, uTxOutList) => {
   const wantedTxOut = uTxOutList.find(uTxO => uTxO.txOutId === txIn.txOutId && uTxO.txOutIndex === txIn.txOutIndex);
   if(wantedTxOut === null){
@@ -168,8 +160,12 @@ const validateTxIn = (txIn, tx, uTxOutList) => {
   }
 }
 
+
+// TX Amount Input
 const getAmountInTxIn = (txIn, uTxOutList) => findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOutList).amount;
 
+
+// TX 검증
 const validateTx = (tx, uTxOutList) => {
     if(!isTxStructureValid(tx)){
       return false;
@@ -227,8 +223,7 @@ const createCoinbaseTx = (address, blockIndex) => {
 const hasDuplicates = txIns => {
   const groups = _.countBy(txIns, txIn => txIn.txOutId + txIn.txOutIndex);
 
-  return _(groups)
-    .map(value => {
+  return _(groups).map(value => {
       if(value > 1){
         console.log("Found a duplicated txIn");
         return true;
@@ -245,10 +240,7 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
     console.log("Coinbase Tx is invalid");
   }
 
-  const txIns = _(txs)
-    .map(tx => tx.txIns)
-    .flatten()
-    .value();
+  const txIns = _(txs).map(tx => tx.txIns).flatten().value();
 
   if(hasDuplicates(txIns)){
     console.log("Found duplicated txIns");
@@ -257,9 +249,7 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
 
   const nonCoinbaseTxs = txs.slice(1);
 
-  return nonCoinbaseTxs
-    .map(tx => validateTx(tx, uTxOutList))
-    .reduce((a, b) => a + b, true);
+  return nonCoinbaseTxs.map(tx => validateTx(tx, uTxOutList)).reduce((a, b) => a + b, true);
 }
 
 const processTxs = (txs, uTxOutList, blockIndex) => {
@@ -277,5 +267,6 @@ module.exports = {
   Transaction,
   TxOut,
   createCoinbaseTx,
-  processTxs
+  processTxs,
+  validateTx
 }

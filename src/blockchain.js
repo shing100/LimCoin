@@ -1,11 +1,15 @@
 const CryptoJS = require("crypto-js"),
+  _ = require("lodash"),
   Wallet = require("./wallet"),
+  Mempool = require("./memPool"),
   Transactions = require("./Transactions"),
   hexToBinary = require("hex-to-binary");
 
-const { getBalance, getPublicFromWallet } = Wallet;
+const { getBalance, getPublicFromWallet, createTx, getPrivateFromWallet  } = Wallet;
 
 const { createCoinbaseTx, processTxs } = Transactions;
+
+const { addToMempool, getMempool, updateMempool } = Mempool;
 
 const BlOCK_GENERATION_INTERVAL = 10;
 const DIFFICULTY_ADJUSMENT_INTERVAL = 10;
@@ -51,7 +55,7 @@ const createHash = (index, previousHash, timestamp, data, difficulty, nonce) =>
 const createNewBlock = () => {
   const coinbaseTx = createCoinbaseTx(getPublicFromWallet(), getNewestBlock().index + 1);
 
-  const blockData = [coinbaseTx];
+  const blockData = [coinbaseTx].concat(getMempool());
 
   return createNewRawBlock(blockData);
 };
@@ -176,10 +180,7 @@ const isChainValid = (candidateChain) => {
 };
 // 난이도 구분하기
 const sumDifficulty = anyBlockchain =>
-  anyBlockchain
-    .map(block => block.difficulty)
-    .map(difficulty => Math.pow(2,difficulty))
-    .reduce((a,b) => a + b);
+  anyBlockchain.map(block => block.difficulty).map(difficulty => Math.pow(2,difficulty)).reduce((a,b) => a + b);
 // 블록체인 재배치
 const replaceChain = candidateChain => {
   if(
@@ -206,6 +207,7 @@ const addBlockToChain = candidateBlock => {
     }else{
         getBlockChain().push(candidateBlock);
         uTxOuts = processedTxs;
+        updateMempool(uTxOuts);
         return true;
     }
     return true;
@@ -214,7 +216,15 @@ const addBlockToChain = candidateBlock => {
   }
 };
 
+const getUTxOutList = () => _.cloneDeep(uTxOuts);
+
 const getAccountBalance = () => getBalance(getPublicFromWallet(), uTxOuts);
+
+const sendTx = (address, amount) => {
+  const tx = createTx(address, amount, getPrivateFromWallet(), getUTxOutList(), getMempool());
+  addToMempool(tx, getUTxOutList());
+  return tx;
+};
 
 module.exports = {
   replaceChain,
@@ -223,5 +233,6 @@ module.exports = {
   getNewestBlock,
   getBlockChain,
   createNewBlock,
-  getAccountBalance
+  getAccountBalance,
+  sendTx
 };

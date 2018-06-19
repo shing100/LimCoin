@@ -7,8 +7,20 @@ Content-Type: application/json
   "data":"Second block"
 }
 
+
 POST http://localhost:3000/peers
 Content-Type: application/json
 {
   "peer": "ws://localhost:4000"
+}
+
+
+GET http://localhost:3000/me/balance
+
+
+POST http://localhost:3000/transactions/
+Content-Type: application/json
+{
+    "address": "04fcb2d91c03d62594a43ab4bfd84cd9fb22d80033b833a059afc1c73ee98b8eb5926deeb54d4e1fb70aaa6d4a862a690b5f66f1afa62d0a5aea8775f59752846e",
+    "amount": 10
 }
