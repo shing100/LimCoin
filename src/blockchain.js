@@ -54,14 +54,13 @@ const createHash = (index, previousHash, timestamp, data, difficulty, nonce) =>
 
 const createNewBlock = () => {
   const coinbaseTx = createCoinbaseTx(getPublicFromWallet(), getNewestBlock().index + 1);
-
-  // 다른 채굴 코인을 MemPool에 추가하기 위함
+  // 다른 채굴 코인을 Mempool에 추가하기
   const blockData = [coinbaseTx].concat(getMempool());
 
   return createNewRawBlock(blockData);
 };
 
-// 새로운 블록추가하기
+// 새 블록 추가하기
 const createNewRawBlock = data => {
   const previousBlock = getNewestBlock();
   const newBlockIndex = previousBlock.index + 1;
@@ -158,9 +157,7 @@ const isBlockStructureValid = (block) => {
     typeof block.hash === 'string' &&
     typeof block.previousHash === 'string' &&
     typeof block.timestamp === 'number' &&
-    typeof block.data === 'object' &&
-    typeof block.difficulty === 'number' &&
-    typeof block.nonce === 'number'
+    typeof block.data === 'object'
   );
 };
 
@@ -182,7 +179,10 @@ const isChainValid = (candidateChain) => {
 };
 // 난이도 구분하기
 const sumDifficulty = anyBlockchain =>
-  anyBlockchain.map(block => block.difficulty).map(difficulty => Math.pow(2,difficulty)).reduce((a,b) => a + b);
+  anyBlockchain
+    .map(block => block.difficulty)
+    .map(difficulty => Math.pow(2,difficulty))
+    .reduce((a,b) => a + b);
 // 블록체인 재배치
 const replaceChain = candidateChain => {
   if(
@@ -201,7 +201,7 @@ const addBlockToChain = candidateBlock => {
     const processedTxs = processTxs(
       candidateBlock.data,
       uTxOuts,
-      candidateBlock.blockIndex
+      candidateBlock.index
     );
     if(processedTxs === null){
       console.log("Couldnt process txs");
@@ -227,7 +227,6 @@ const sendTx = (address, amount) => {
   addToMempool(tx, getUTxOutList());
   return tx;
 };
-
 
 module.exports = {
   replaceChain,

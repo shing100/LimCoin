@@ -43,13 +43,6 @@ const startP2PServer = server => {
   console.log("LimCoin P2P Server Running!");
 };
 
-const connectToPeers = newPeer => {
-  const ws = new WebSockets(newPeer);
-  ws.on("open", () => {
-      initSocketConnection(ws);
-  });
-};
-
 // 웹 소켓 연결하기
 const initSocketConnection = ws => {
   sockets.push(ws);
@@ -137,7 +130,14 @@ const handleSocketError = ws => {
   };
   ws.on("close", () => closeSocketConnetion(ws));
   ws.on("error", () => closeSocketConnetion(ws));
-}
+};
+
+const connectToPeers = newPeer => {
+  const ws = new WebSockets(newPeer);
+  ws.on("open", () => {
+      initSocketConnection(ws);
+  });
+};
 
 module.exports = {
   startP2PServer,

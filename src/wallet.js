@@ -1,10 +1,18 @@
-const elliptic = require('elliptic'),
+const elliptic = require("elliptic"),
   path = require("path"),
   fs = require("fs"),
   _ = require("lodash"),
-  Transactions = require("./Transactions")
+  Transactions = require("./transactions");
 
-const { getPublicKey, getTxId,signTxIn, TxIn, Transaction, TxOut } = Transactions;
+const {
+  getPublicKey,
+  getTxId,
+  signTxIn,
+  TxIn,
+  Transaction,
+  TxOut
+} = Transactions;
+
 const ec = new elliptic.ec("secp256k1");
 
 const privateKeyLocation = path.join(__dirname, "privateKey");
@@ -28,13 +36,13 @@ const getPublicFromWallet = () => {
 
 const getBalance = (address, uTxOuts) => {
   return _(uTxOuts)
-  .filter(uTxO => uTxO.address === address)
-  .map(uTxO => uTxO.amount)
-  .sum();
-}
+    .filter(uTxO => uTxO.address === address)
+    .map(uTxO => uTxO.amount)
+    .sum();
+};
 
 const initWallet = () => {
-  if(fs.existsSync(privateKeyLocation)){
+  if (fs.existsSync(privateKeyLocation)) {
     return;
   }
   const newPrivateKey = generatePrivateKey();
@@ -45,10 +53,10 @@ const initWallet = () => {
 const findAmountInUTxOuts = (amountNeeded, myUTxOuts) => {
   let currentAmount = 0;
   const includedUTxOuts = [];
-  for(const myUTxOut of myUTxOuts) {
+  for (const myUTxOut of myUTxOuts) {
     includedUTxOuts.push(myUTxOut);
     currentAmount = currentAmount + myUTxOut.amount;
-    if(currentAmount >= amountNeeded) {
+    if (currentAmount >= amountNeeded) {
       const leftOverAmount = currentAmount - amountNeeded;
       return { includedUTxOuts, leftOverAmount };
     }
@@ -59,13 +67,13 @@ const findAmountInUTxOuts = (amountNeeded, myUTxOuts) => {
 
 const createTxOuts = (receiverAddress, myAddress, amount, leftOverAmount) => {
   const receiverTxOut = new TxOut(receiverAddress, amount);
-  if(leftOverAmount === 0) {
+  if (leftOverAmount === 0) {
     return [receiverTxOut];
-  }else{
+  } else {
     const leftOverTxOut = new TxOut(myAddress, leftOverAmount);
     return [receiverTxOut, leftOverTxOut];
   }
-}
+};
 
 const filterUTxOutsFromMempool = (uTxOutList, mempool) => {
   const txIns = _(mempool)
@@ -81,7 +89,7 @@ const filterUTxOutsFromMempool = (uTxOutList, mempool) => {
       txIn =>
         txIn.txOutIndex === uTxOut.txOutIndex && txIn.txOutId === uTxOut.txOutId
     );
-    if (!txIn === undefined) {
+    if (txIn !== undefined) {
       removables.push(uTxOut);
     }
   }
@@ -105,7 +113,7 @@ const createTx = (receiverAddress, amount, privateKey, uTxOutList, memPool) => {
     txIn.txOutId = uTxOut.txOutId;
     txIn.txOutIndex = uTxOut.txOutIndex;
     return txIn;
-  }
+  };
 
   const unsignedTxIns = includedUTxOuts.map(toUnsignedTxIn);
 
@@ -115,10 +123,12 @@ const createTx = (receiverAddress, amount, privateKey, uTxOutList, memPool) => {
   tx.txOuts = createTxOuts(receiverAddress, myAddress, amount, leftOverAmount);
 
   tx.id = getTxId(tx);
+
   tx.txIns = tx.txIns.map((txIn, index) => {
     txIn.signature = signTxIn(tx, index, privateKey, uTxOutList);
     return txIn;
   });
+
   return tx;
 };
 
@@ -128,4 +138,4 @@ module.exports = {
   getPublicFromWallet,
   createTx,
   getPrivateFromWallet
-}
+};
