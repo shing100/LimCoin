@@ -103,7 +103,6 @@ const createTx = (receiverAddress, amount, privateKey, uTxOutList, memPool) => {
   const toUnsignedTxIn = uTxOut => {
     const txIn = new TxIn();
     txIn.txOutId = uTxOut.txOutId;
-    // tx
     txIn.txOutIndex = uTxOut.txOutIndex;
     return txIn;
   }

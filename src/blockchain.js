@@ -55,11 +55,13 @@ const createHash = (index, previousHash, timestamp, data, difficulty, nonce) =>
 const createNewBlock = () => {
   const coinbaseTx = createCoinbaseTx(getPublicFromWallet(), getNewestBlock().index + 1);
 
+  // 다른 채굴 코인을 MemPool에 추가하기 위함
   const blockData = [coinbaseTx].concat(getMempool());
 
   return createNewRawBlock(blockData);
 };
 
+// 새로운 블록추가하기
 const createNewRawBlock = data => {
   const previousBlock = getNewestBlock();
   const newBlockIndex = previousBlock.index + 1;
@@ -225,6 +227,7 @@ const sendTx = (address, amount) => {
   addToMempool(tx, getUTxOutList());
   return tx;
 };
+
 
 module.exports = {
   replaceChain,

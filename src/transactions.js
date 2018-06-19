@@ -52,9 +52,13 @@ const signTxIn = (tx, txInIndex, privateKey, uTxOutList) => {
   const txIn = tx.txIns[txInIndex];
   const dataToSign = tx.id;
   // find Tx
-  const referencedUTxOut = findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOutList);
+  const referencedUTxOut = findUTxOut(
+    txIn.txOutId,
+    txIn.txOutIndex,
+    uTxOutList
+  );
   if(referencedUTxOut === null || referencedUTxOut === undefined){
-    throw Error("Couldn't not find the referenced uTxOut or not signing");
+    throw Error("Couldn't not find the referenced uTxOut, not signing");
     return;
   }
   // 주소 검증하기
