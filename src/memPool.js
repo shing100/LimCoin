@@ -39,6 +39,7 @@ const hasTxIn = (txIn, uTxOutList) => {
   return foundTxIn !== undefined;
 };
 
+// update Mempool
 const updateMempool = uTxOutList => {
   const invalidTxs = [];
 
@@ -56,6 +57,7 @@ const updateMempool = uTxOutList => {
   }
 };
 
+// Mempool 에 추가하기
 const addToMempool = (tx, uTxOutList) => {
   if (!validateTx(tx, uTxOutList)) {
     throw Error("This tx is invalid. Will not add it to pool");

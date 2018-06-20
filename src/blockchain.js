@@ -27,19 +27,31 @@ class Block{
   }
 }
 
+// Genesis Tx 하드코딩 작업
+const genesisTx = {
+  txIns:[{signature: "",txOutId: "",txOutIndex: 0}],
+  txOuts:[
+    {
+      address: "04fcb2d91c03d62594a43ab4bfd84cd9fb22d80033b833a059afc1c73ee98b8eb5926deeb54d4e1fb70aaa6d4a862a690b5f66f1afa62d0a5aea8775f59752846e",
+      amount: 10
+    }
+  ],
+  id: "104ec1acfe866485a5f256e840ccaaa38d863fd83bdaaacf1d0937fa3b864435"
+};
+
 const genesisBlock = new Block(
   0,
-  "D0124ED72DDCF46D7493B291D7101BF06564FE0CC54544633CA8D75AA6E456A5",
-  null,
+  "29c40470cb988691014c979be3d6b1e35249e5b96651f97fc0d18e67db4ab513",
+  "",
   1524382524,
-  "This is the Genesis!",
-  12,
+  [genesisTx],
+  20,
   0
 );
 
 let blockchain = [genesisBlock];
 
-let uTxOuts = [];
+let uTxOuts = processTxs(blockchain[0].data, [], 0);
 
 const getNewestBlock = () => blockchain[blockchain.length - 1];
 
@@ -131,6 +143,9 @@ const isTimeStampValid = (newBlock, oldBlock) => {
 }
 // 헤시 만들기
 const getBlockHash = block => createHash(block.index, block.previousHash, block.timestamp, block.data, block.difficulty, block.nonce);
+
+// genesis Block 초기 hash 값 넣기
+//console.log(createHash(genesisBlock));
 // 블록 유효성 체크하기
 const isBlockValid = (candidateBlock, latestBlock) => {
   if(!isBlockStructureValid(candidateBlock)){

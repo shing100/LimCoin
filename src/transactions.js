@@ -47,6 +47,9 @@ const getTxId = tx => {
   return CryptoJS.SHA256(txInContent + txOutContent + tx.timestamp).toString();
 };
 
+// genesisTx id 값을 알아내기 위한 로그
+//console.log(getTxId(genesisTx));
+
 const findUTxOut = (txOutId, txOutIndex, uTxOutList) => {
   return uTxOutList.find(
     uTxO => uTxO.txOutId === txOutId && uTxO.txOutIndex === txOutIndex
