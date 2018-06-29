@@ -2,13 +2,15 @@ const express = require("express"),
     bodyParser = require("body-parser"),
     cors = require("cors"),
     morgan = require("morgan"),
-    Blockchain = require("./blockchain");
+    Blockchain = require("./blockchain"),
+    Mempool = require("./mempool"),
     P2P = require("./p2p"),
     Wallet = require("./wallet");
 
 const { getBlockChain, createNewBlock, getAccountBalance, sendTx } = Blockchain;
 const { startP2PServer, connectToPeers } = P2P;
-const { initWallet } = Wallet;
+const { initWallet, getPublicFromWallet } = Wallet;
+const { getMempool } = Mempool;
 
 const PORT = process.env.HTTP_PORT || 3000;
 
@@ -35,8 +37,14 @@ app.get("/me/balance", (req, res) => {
   res.send({ balance });
 });
 
+app.get("/me/address", (req,res)) => {
+  res.send(getPublicFromWallet());
+}
+
 app.route("/transactions")
-  .get((req, res) => {})
+  .get((req, res) => {
+    res.send(getMempool());
+  })
   .post((req, res) => {
     try {
       const { body: { address, amount } } = req;
