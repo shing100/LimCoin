@@ -183,14 +183,24 @@ const isChainValid = (candidateChain) => {
     };
     if(!isGenesisValid(candidateChain[0])){
       console.log('The candidateChains genesisBlock is not the same as our genesisBlock');
-      return false;
+      return null;
     };
-    for(let i=1; i<candidateChain.length; i++){
-      if(!isBlockValid(candidateChain[i], candidateChain[i-1])){
-        return false;
+    // 다른 포트에도 TxOUt 을 적용하기 위한 단계
+    let foreignUTxOuts = [];
+
+    for(let i=0; i<candidateChain.length; i++){
+      const currentBlock = candidateBlock[i];
+      if(1 !== 0 && !isBlockValid(currentBlock, candidateChain[i-1])){
+        return null;
+      }
+
+      foreignUTxOuts = processTxs(currentBlock.data, foreignUTxOuts, currentBlock.index);
+
+      if(foreignUTxOuts === null){
+        return null;
       }
     };
-    return true;
+    return foreignUTxOuts;
 };
 // 난이도 구분하기
 const sumDifficulty = anyBlockchain =>
@@ -200,11 +210,16 @@ const sumDifficulty = anyBlockchain =>
     .reduce((a,b) => a + b);
 // 블록체인 재배치
 const replaceChain = candidateChain => {
+  const foreignUTxOuts = isChainValid(candidateChain);
+  const validChain = foreignUTxOuts !== null;
   if(
-    isChainValid(candidateChain) &&
+    validChain &&
     sumDifficulty(candidateChain) > sumDifficulty(getBlockChain())
   ){
     blockchain = candidateChain;
+    uTxOuts = foreignUTxOuts;
+    updateMempool(uTxOuts);
+    require('./p2p').broadcastNewBlock();
     return true;
   }else{
     return false;
@@ -240,7 +255,12 @@ const getAccountBalance = () => getBalance(getPublicFromWallet(), uTxOuts);
 const sendTx = (address, amount) => {
   const tx = createTx(address, amount, getPrivateFromWallet(), getUTxOutList(), getMempool());
   addToMempool(tx, getUTxOutList());
+  require("./p2p").broadcastMempool();
   return tx;
+};
+
+const handleIncomingTx = (tx) => {
+  addToMempool(tx, getUTxOutList());
 };
 
 module.exports = {
@@ -251,5 +271,6 @@ module.exports = {
   getBlockChain,
   createNewBlock,
   getAccountBalance,
-  sendTx
+  sendTx,
+  handleIncomingTx
 };

@@ -189,7 +189,7 @@ const validateTxIn = (txIn, tx, uTxOutList) => {
   const wantedTxOut = uTxOutList.find(
     uTxO => uTxO.txOutId === txIn.txOutId && uTxO.txOutIndex === txIn.txOutIndex
   );
-  if (wantedTxOut === null) {
+  if (wantedTxOut === undefined) {
     console.log(`Didn't find the wanted uTxOut, the tx: ${tx} is invalid`);
     return false;
   } else {
@@ -317,6 +317,7 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
     .reduce((a, b) => a + b, true);
 };
 
+// Tx 프로세스
 const processTxs = (txs, uTxOutList, blockIndex) => {
   if (!validateBlockTxs(txs, uTxOutList, blockIndex)) {
     return null;

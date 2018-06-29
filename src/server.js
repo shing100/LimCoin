@@ -37,9 +37,9 @@ app.get("/me/balance", (req, res) => {
   res.send({ balance });
 });
 
-app.get("/me/address", (req,res)) => {
+app.get("/me/address", (req,res) => {
   res.send(getPublicFromWallet());
-}
+});
 
 app.route("/transactions")
   .get((req, res) => {

@@ -1,14 +1,18 @@
 const WebSockets = require('ws'),
-  Blockchain = require('./blockchain');
+  Blockchain = require('./blockchain'),
+  Mempool = require("./mempool");
 
-const { getNewestBlock, isBlockStructureValid, replaceChain, getBlockChain, addBlockToChain } = Blockchain;
+const { getNewestBlock, isBlockStructureValid, replaceChain, getBlockChain, addBlockToChain, handleIncomingTx } = Blockchain;
 
+const { getMempool } = Mempool;
 const sockets = [];
 
 // Message Type
 const GET_LATEST = "GET_LATEST";
 const GET_ALL = "GET_ALL";
 const BLOCKCHAIN_RESPONSE = "BLOCKCHAIN_RESPONSE";
+const REQUEST_MEMPOOL = "REQUEST_MEMPOOL";
+const MEMPOOL_RESPONSE = "MEMPOOL_RESPONSE";
 
 // Message Creators
 const getLatest = () => {
@@ -32,6 +36,20 @@ const blockchainResponse = (data) => {
   }
 }
 
+const getAllMempool = () => {
+  return {
+    type: REQUEST_MEMPOOL,
+    data: null
+  };
+};
+
+const mempoolResponse = data => {
+  return {
+    type: MEMPOOL_RESPONSE,
+    data
+  };
+};
+
 // 소켓 가져오기
 const getSockets = () => sockets;
 
@@ -40,6 +58,9 @@ const startP2PServer = server => {
   wsServer.on("connection", ws => {
     initSocketConnection(ws);
   });
+  wsServer.on("error", () => {
+    console.log(error);
+  })
   console.log("LimCoin P2P Server Running!");
 };
 
@@ -49,6 +70,9 @@ const initSocketConnection = ws => {
   handleSocketMessages(ws);
   handleSocketError(ws);
   sendMessage(ws, getLatest());
+  setTimeout(() => {
+    sendMessage(ws, getAllMempool());
+  }, 1000);
 };
 
 // 데이터 JSON 변환
@@ -68,7 +92,6 @@ const handleSocketMessages = ws => {
     if(message === null){
       return;
     }
-    console.log(message);
     switch (message.type) {
       case GET_LATEST:
         sendMessage(ws, responseLatest());  // 가장 최근
@@ -83,9 +106,27 @@ const handleSocketMessages = ws => {
         }
         handleBlockchainResponse(receivedBlocks);
         break;
+      case REQUEST_MEMPOOL:
+        sendMessage(ws, returnMempool());
+        break;
+      case MEMPOOL_RESPONSE:
+        const receivedTxs = message.data;
+        if(receivedTxs === null){
+          return;
+        }
+        receivedTxs.forEach(tx => {
+          try{
+            handleIncomingTx(tx);
+          }catch(e){
+            console.log(e);
+          }
+        })
+        break;
     }
   });
 };
+
+const returnMempool = () => mempoolResponse(getMempool());
 
 // 블록체인응답 핸들러
 const handleBlockchainResponse = receivedBlocks => {
@@ -122,6 +163,9 @@ const responseLatest = () => blockchainResponse([getNewestBlock()]);
 const responseAll = () => blockchainResponse(getBlockChain());
 // 모두에게 블록 알리기
 const broadcastNewBlock = () => sendMessageToAll(responseLatest());
+// 맴풀 전달하기
+const broadcastMempool = () => sendMessageToAll(returnMempool());
+
 // 에러 체크
 const handleSocketError = ws => {
   const closeSocketConnetion = ws => {
@@ -142,5 +186,6 @@ const connectToPeers = newPeer => {
 module.exports = {
   startP2PServer,
   connectToPeers,
-  broadcastNewBlock
+  broadcastNewBlock,
+  broadcastMempool
 };
