@@ -272,5 +272,6 @@ module.exports = {
   createNewBlock,
   getAccountBalance,
   sendTx,
-  handleIncomingTx
+  handleIncomingTx,
+  getUTxOutList
 };
