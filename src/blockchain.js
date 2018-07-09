@@ -45,7 +45,7 @@ const genesisBlock = new Block(
   "",
   1524382524,
   [genesisTx],
-  20,
+  15,
   0
 );
 
@@ -89,7 +89,7 @@ const createNewRawBlock = data => {
   require("./p2p").broadcastNewBlock();
   return newBlock;
 }
-// 블록 난이도 찾기
+// 블록 난이도 찾기 와 조정
 const findDifficulty = () => {
   const newestBlock = getNewestBlock();
   if(newestBlock.index % DIFFICULTY_ADJUSMENT_INTERVAL === 0 && newestBlock.index !== 0) {
