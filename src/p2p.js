@@ -177,8 +177,8 @@ const handleSocketError = ws => {
     ws.close();
     sockets.splice(sockets.indexOf(ws),1);
   };
-  ws.on("error", () => console.log("Connection failed"));
-  ws.on("close", () => console.log("Connection closed"));
+  ws.on("error", () => closeSocketConnetion(ws));
+  ws.on("close", () => closeSocketConnetion(ws));
 };
 
 const connectToPeers = newPeer => {
@@ -186,6 +186,8 @@ const connectToPeers = newPeer => {
   ws.on("open", () => {
       initSocketConnection(ws);
   });
+  ws.on("error", () => console.log("Connection failed"));
+  ws.on("close", () => console.log("Connection closed"));
 };
 
 module.exports = {
