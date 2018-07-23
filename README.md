@@ -68,17 +68,36 @@ LimCoin, the coin made in NodeJS
 4. createHash 해쉬 만들기 함수 CryptoJS 사용
 
 
+### memPool.js
+1. addToMempool
+2. getMempool
+3. updateMempool
 
+### p2p.js
+1. startP2PServer
+2. connectToPeers
+3. broadcastNewBlock
+4. broadcastMempool 
 
- ### memPool.js
+### server.js
 
- ### p2p.js
- 
- ### server.js
+### transaction.js
+1. getPublicKey
+2. getTxId
+3. signTxIn
+4. TxIn
+5. Transaction
+6. TxOut
+7. createCoinbaseTx
+8. processTxs
+9. validateTx
 
- ### transaction.js
+### utils.js
+1. toHexString
 
- ### utils.js
-
-
- ### wallet.js
+### wallet.js
+1. initWallet
+2. getBalance
+3. getPublicFromWallet
+4. createTx
+5. getPrivateFromWallet
