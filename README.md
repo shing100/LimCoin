@@ -80,6 +80,15 @@ LimCoin, the coin made in NodeJS
 4. broadcastMempool 
 
 ### server.js
+1. /blocks
+2. /blocks/:hash
+3. /peers
+4. /transactions
+5. /transactions/:id
+6. /me/balance
+7. /me/address
+8. /address/:address 
+
 
 ### transaction.js
 1. getPublicKey
