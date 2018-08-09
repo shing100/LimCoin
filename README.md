@@ -20,6 +20,8 @@ LimCoin, the coin made in NodeJS
 - BlockChain 에 Block 추가하기
 #6
 
+- BlockCahin 검증하기
+
 - Send Messages P2P and Actions 싱크 Chain
 #12
 
