@@ -21,6 +21,8 @@ LimCoin, the coin made in NodeJS
 #6
 
 - BlockCahin 검증하기
+    - (미사용) Typescript 를 이용하면 편하게 만들 수 있음 .ts
+    - (미사용) tsc-watch, typescript( tsconfig.json )
 
 - Send Messages P2P and Actions 싱크 Chain
 #12
