@@ -53,12 +53,16 @@ let blockchain = [genesisBlock];
 
 let uTxOuts = processTxs(blockchain[0].data, [], 0);
 
+// 새로운 블록 가져오기
 const getNewestBlock = () => blockchain[blockchain.length - 1];
 
+// 타임스탬프
 const getTimestamp = () => Math.round(new Date().getTime() / 1000);
 
+// 블록체인 전체 가져오기
 const getBlockChain = () => blockchain;
 
+// 해쉬 생성하기
 const createHash = (index, previousHash, timestamp, data, difficulty, nonce) =>
   CryptoJS.SHA256(
     index+previousHash+timestamp+JSON.stringify(data)+difficulty+nonce
@@ -112,6 +116,7 @@ const calculateNewDifficulty = (newestBlock, blockchain) => {
   }
 }
 
+// 블록 찾기
 const findBlock = (index, previousHash, timestamp, data, difficulty) => {
     let nonce = 0;
     while(true){
@@ -248,8 +253,10 @@ const addBlockToChain = candidateBlock => {
   }
 };
 
+// TxOutList 가져오기
 const getUTxOutList = () => _.cloneDeep(uTxOuts);
 
+// 지갑 정보 가져오기
 const getAccountBalance = () => getBalance(getPublicFromWallet(), uTxOuts);
 
 const sendTx = (address, amount) => {

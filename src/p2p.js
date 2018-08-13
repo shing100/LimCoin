@@ -53,6 +53,7 @@ const mempoolResponse = data => {
 // 소켓 가져오기
 const getSockets = () => sockets;
 
+// 서버 시작하기
 const startP2PServer = server => {
   const wsServer = new WebSockets.Server({server});
   wsServer.on("connection", ws => {
@@ -145,6 +146,7 @@ const handleBlockchainResponse = receivedBlocks => {
     return;
   }
   const newestBlock = getNewestBlock();
+  // 가져온 블록과 내 블록 비교
   if(latestBlockReceived.index > newestBlock.index){
     if(newestBlock.hash === latestBlockReceived.previousHash){
       if(addBlockToChain(latestBlockReceived)) {

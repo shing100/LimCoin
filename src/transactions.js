@@ -35,6 +35,7 @@ class UTxOut {
   }
 }
 
+// tx id 가져오기
 const getTxId = tx => {
   const txInContent = tx.txIns
     .map(txIn => txIn.txOutId + txIn.txOutIndex)
@@ -267,6 +268,7 @@ const validateCoinbaseTx = (tx, blockIndex) => {
   }
 };
 
+// 코인 기반 트렌젝션 가져오기
 const createCoinbaseTx = (address, blockIndex) => {
   const tx = new Transaction();
   const txIn = new TxIn();
