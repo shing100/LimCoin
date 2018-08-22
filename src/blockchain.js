@@ -11,9 +11,9 @@ const { createCoinbaseTx, processTxs } = Transactions;
 
 const { addToMempool, getMempool, updateMempool } = Mempool;
 
-const BlOCK_GENERATION_INTERVAL = 10;
-const DIFFICULTY_ADJUSMENT_INTERVAL = 10;
-const TIMESTAMP_MINIT = 60;
+const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기
+const DIFFICULTY_ADJUSMENT_INTERVAL = 10; // 난이도 조정 주기
+const TIMESTAMP_MINIT = 60; 
 
 class Block{
   constructor(index, hash, previousHash, timestamp, data, difficulty, nonce){
@@ -68,6 +68,7 @@ const createHash = (index, previousHash, timestamp, data, difficulty, nonce) =>
     index+previousHash+timestamp+JSON.stringify(data)+difficulty+nonce
   ).toString();
 
+// 코인 기반 새로운 블록 생성하기
 const createNewBlock = () => {
   const coinbaseTx = createCoinbaseTx(getPublicFromWallet(), getNewestBlock().index + 1);
   // 다른 채굴 코인을 Mempool에 추가하기
@@ -89,10 +90,11 @@ const createNewRawBlock = data => {
     data,
     difficulty
   );
-  addBlockToChain(newBlock);
-  require("./p2p").broadcastNewBlock();
+  addBlockToChain(newBlock); // 블록체인에 추가
+  require("./p2p").broadcastNewBlock(); // 연결시 브로드케스팅
   return newBlock;
 }
+
 // 블록 난이도 찾기 와 조정
 const findDifficulty = () => {
   const newestBlock = getNewestBlock();
@@ -102,6 +104,7 @@ const findDifficulty = () => {
     return newestBlock.difficulty;
   }
 }
+
 // 난이도 계산기
 const calculateNewDifficulty = (newestBlock, blockchain) => {
   const lastCalculatedBlock = blockchain[blockchain.length - DIFFICULTY_ADJUSMENT_INTERVAL];
@@ -116,7 +119,7 @@ const calculateNewDifficulty = (newestBlock, blockchain) => {
   }
 }
 
-// 블록 찾기
+// nonce를 이용하여 원하는 블록 찾기
 const findBlock = (index, previousHash, timestamp, data, difficulty) => {
     let nonce = 0;
     while(true){
@@ -135,7 +138,7 @@ const findBlock = (index, previousHash, timestamp, data, difficulty) => {
       nonce++
     }
 };
-// 난이도
+// 난이도 0 찾기 조정
 const hashMatchesDifficulty = (hash, difficulty = 15) => {
   const hashInBinary = hexToBinary(hash);
   const requiredZeros = "0".repeat(difficulty);
@@ -170,6 +173,7 @@ const isBlockValid = (candidateBlock, latestBlock) => {
   }
   return true;
 };
+
 // 블록 유효성 체크
 const isBlockStructureValid = (block) => {
   return (
@@ -247,7 +251,7 @@ const addBlockToChain = candidateBlock => {
         updateMempool(uTxOuts);
         return true;
     }
-    return true;
+    //return true;
   }else{
     return false;
   }
@@ -259,6 +263,7 @@ const getUTxOutList = () => _.cloneDeep(uTxOuts);
 // 지갑 정보 가져오기
 const getAccountBalance = () => getBalance(getPublicFromWallet(), uTxOuts);
 
+// 보내는 트렌젝션
 const sendTx = (address, amount) => {
   const tx = createTx(address, amount, getPrivateFromWallet(), getUTxOutList(), getMempool());
   addToMempool(tx, getUTxOutList());

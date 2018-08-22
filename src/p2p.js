@@ -71,6 +71,7 @@ const initSocketConnection = ws => {
   handleSocketMessages(ws);
   handleSocketError(ws);
   sendMessage(ws, getLatest());
+  // 주기적으로 메세지 전송
   setTimeout(() => {
     sendMessageToAll(getAllMempool());
   }, 1000);
@@ -146,7 +147,7 @@ const handleBlockchainResponse = receivedBlocks => {
     return;
   }
   const newestBlock = getNewestBlock();
-  // 가져온 블록과 내 블록 비교
+  // 가져온 블록과 기존 블록 비교
   if(latestBlockReceived.index > newestBlock.index){
     if(newestBlock.hash === latestBlockReceived.previousHash){
       if(addBlockToChain(latestBlockReceived)) {
