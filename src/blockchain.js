@@ -49,6 +49,7 @@ const genesisBlock = new Block(
   0
 );
 
+// 블록체인
 let blockchain = [genesisBlock];
 
 let uTxOuts = processTxs(blockchain[0].data, [], 0);
