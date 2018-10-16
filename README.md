@@ -30,6 +30,9 @@ LimCoin, the coin made in NodeJS
 - Broadcasting
 #13
 
+- Transections
+#22
+
 
 --------------------------
 
