@@ -83,7 +83,7 @@ const createNewRawBlock = data => {
   const previousBlock = getNewestBlock();
   const newBlockIndex = previousBlock.index + 1;
   const newTimestamp = getTimestamp();
-  const difficulty = findDifficulty(getBlockChain());
+  const difficulty = findDifficulty();
   const newBlock = findBlock(
     newBlockIndex,
     previousBlock.hash,
@@ -113,7 +113,7 @@ const calculateNewDifficulty = (newestBlock, blockchain) => {
   const timeTaken = newestBlock.timestamp - lastCalculatedBlock.timestamp;
   if(timeTaken < timeExpected/2){
     return lastCalculatedBlock.difficulty + 1;
-  }else if(timeTaken > timeExpected*2){
+  }else if(timeTaken > timeExpected/2){
     return lastCalculatedBlock.difficulty - 1;
   }else{
     return lastCalculatedBlock.difficulty;
