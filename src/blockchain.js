@@ -3,25 +3,41 @@ const CryptoJS = require("crypto-js"),
   Wallet = require("./wallet"),
   Mempool = require("./memPool"),
   Transactions = require("./transactions"),
+  Merkle = require("./merkle"),
   hexToBinary = require("hex-to-binary");
+
+const { getMerkleRoot, getMerkleProof } = Merkle;
 
 const { getBalance, getPublicFromWallet, createTx, getPrivateFromWallet  } = Wallet;
 
-const { createCoinbaseTx, processTxs } = Transactions;
+const { createCoinbaseTx, processTxs, getTxFee, MAX_TXS_PER_BLOCK } = Transactions;
 
-const { addToMempool, getMempool, updateMempool } = Mempool;
+const { addToMempool, getMempool, updateMempool, selectTxsForBlock } = Mempool;
 
 const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기
 const DIFFICULTY_ADJUSMENT_INTERVAL = 10; // 난이도 조정 주기
 const TIMESTAMP_MINIT = 60;
 const MIN_DIFFICULTY = 1; // 0 이면 어떤 해시든 통과해 버린다
 
+/*
+ * 블록 = 헤더 + 본문.
+ *
+ * 헤더가 커밋하는 것은 index, previousHash, timestamp, merkleRoot,
+ * difficulty, nonce 뿐이다. 트랜잭션 목록(data)은 머클 루트를 통해서만
+ * 묶인다 — 백서 7장 "transactions are hashed in a Merkle Tree, with only
+ * the root included in the block's hash".
+ *
+ * 예전에는 JSON.stringify(data) 를 해시에 통째로 넣었다. 그러면 직렬화
+ * 방식이 곧 합의 규칙이 되어 버리고(키 순서가 바뀌면 해시가 달라진다),
+ * 트랜잭션 하나가 블록에 있는지 확인하려면 블록 전체를 받아야 했다.
+ */
 class Block{
-  constructor(index, hash, previousHash, timestamp, data, difficulty, nonce){
+  constructor(index, hash, previousHash, timestamp, merkleRoot, data, difficulty, nonce){
     this.index = index;
     this.hash = hash;
     this.previousHash = previousHash;
     this.timestamp = timestamp;
+    this.merkleRoot = merkleRoot;
     this.data = data;
     this.difficulty = difficulty;
     this.nonce = nonce;
@@ -38,6 +54,7 @@ const genesisBlock = new Block(
   genesisData.hash,
   genesisData.previousHash,
   genesisData.timestamp,
+  genesisData.merkleRoot,
   genesisData.data,
   genesisData.difficulty,
   genesisData.nonce
@@ -57,19 +74,33 @@ const getTimestamp = () => Math.round(new Date().getTime() / 1000);
 // 블록체인 전체 가져오기
 const getBlockChain = () => blockchain;
 
-// 해쉬 생성하기
-const createHash = (index, previousHash, timestamp, data, difficulty, nonce) =>
+// 헤더 해시. 본문(data)이 아니라 머클 루트만 들어간다.
+const createHash = (index, previousHash, timestamp, merkleRoot, difficulty, nonce) =>
   CryptoJS.SHA256(
-    index+previousHash+timestamp+JSON.stringify(data)+difficulty+nonce
+    index+previousHash+timestamp+merkleRoot+difficulty+nonce
   ).toString();
 
 // 코인 기반 새로운 블록 생성하기
 const createNewBlock = () => {
-  const coinbaseTx = createCoinbaseTx(getPublicFromWallet(), getNewestBlock().index + 1);
-  // 다른 채굴 코인을 Mempool에 추가하기
-  const blockData = [coinbaseTx].concat(getMempool());
+  const nextIndex = getNewestBlock().index + 1;
+  const uTxOuts = getUTxOutList();
 
-  return createNewRawBlock(blockData);
+  // mempool 전체를 그대로 담던 것을 한도 안에서 수수료율 높은 순으로 고른다.
+  // 코인베이스 자리 하나를 빼고 담는다.
+  const selected = selectTxsForBlock(
+    getMempool(),
+    uTxOuts,
+    MAX_TXS_PER_BLOCK - 1
+  );
+  const totalFees = selected.reduce(
+    (sum, tx) => sum + getTxFee(tx, uTxOuts),
+    0
+  );
+
+  // 채굴자는 보조금에 더해 담은 트랜잭션들의 수수료를 가져간다 (백서 6장)
+  const coinbaseTx = createCoinbaseTx(getPublicFromWallet(), nextIndex, totalFees);
+
+  return createNewRawBlock([coinbaseTx, ...selected]);
 };
 
 // 새 블록 추가하기
@@ -116,19 +147,21 @@ const calculateNewDifficulty = (newestBlock, blockchain) => {
 
 // nonce를 이용하여 원하는 블록 찾기
 const findBlock = (index, previousHash, timestamp, data, difficulty) => {
+    // 본문은 채굴 중에 바뀌지 않으므로 머클 루트는 한 번만 구하면 된다.
+    // 예전에는 nonce 를 돌릴 때마다 트랜잭션 전체를 JSON 으로 직렬화했다.
+    const merkleRoot = getMerkleRoot(data);
     let nonce = 0;
     while(true){
       const hash = createHash(
         index,
         previousHash,
         timestamp,
-        data,
+        merkleRoot,
         difficulty,
         nonce
       );
-      //to do: check amount of zeros (hashMathesDifficulty)
       if(hashMatchesDifficulty(hash, difficulty)){
-        return new Block(index, hash, previousHash, timestamp, data, difficulty, nonce);
+        return new Block(index, hash, previousHash, timestamp, merkleRoot, data, difficulty, nonce);
       }
       nonce++
     }
@@ -145,7 +178,7 @@ const isTimeStampValid = (newBlock, oldBlock) => {
   return (oldBlock.timestamp - TIMESTAMP_MINIT < newBlock.timestamp && newBlock.timestamp - TIMESTAMP_MINIT < getTimestamp())
 }
 // 헤시 만들기
-const getBlockHash = block => createHash(block.index, block.previousHash, block.timestamp, block.data, block.difficulty, block.nonce);
+const getBlockHash = block => createHash(block.index, block.previousHash, block.timestamp, block.merkleRoot, block.difficulty, block.nonce);
 
 // genesis Block 초기 hash 값 넣기
 //console.log(createHash(genesisBlock));
@@ -159,6 +192,11 @@ const isBlockValid = (candidateBlock, latestBlock) => {
     return false;
   }else if(latestBlock.hash !== candidateBlock.previousHash){
     console.log('The previousHash of the candidate block is not the hash of the latest block');
+    return false;
+  }else if(getMerkleRoot(candidateBlock.data) !== candidateBlock.merkleRoot) {
+    // 이 검사가 없으면 머클 루트는 장식일 뿐이다.
+    // 헤더 해시는 맞는데 본문이 다른 블록을 걸러 낸다.
+    console.log('The merkle root does not match the transactions in this block');
     return false;
   }else if(getBlockHash(candidateBlock) !== candidateBlock.hash) {
     console.log('The hash of this block is invalid')
@@ -177,7 +215,8 @@ const isBlockStructureValid = (block) => {
     typeof block.hash === 'string' &&
     typeof block.previousHash === 'string' &&
     typeof block.timestamp === 'number' &&
-    typeof block.data === 'object'
+    typeof block.merkleRoot === 'string' &&
+    block.data instanceof Array
   );
 };
 
@@ -257,6 +296,27 @@ const addBlockToChain = candidateBlock => {
   }
 };
 
+/*
+ * 백서 8장 "Simplified Payment Verification".
+ * 블록 전체를 받지 않고도 트랜잭션이 그 블록에 담겼음을 확인할 수 있게
+ * 머클 증명을 내준다. 검증하는 쪽은 헤더의 merkleRoot 만 있으면 된다.
+ */
+const getTxProof = txId => {
+  for (const block of blockchain) {
+    const proof = getMerkleProof(block.data, txId);
+    if (proof !== null) {
+      return {
+        txId,
+        blockIndex: block.index,
+        blockHash: block.hash,
+        merkleRoot: block.merkleRoot,
+        proof
+      };
+    }
+  }
+  return null;
+};
+
 // TxOutList 가져오기
 const getUTxOutList = () => _.cloneDeep(uTxOuts);
 
@@ -264,8 +324,8 @@ const getUTxOutList = () => _.cloneDeep(uTxOuts);
 const getAccountBalance = () => getBalance(getPublicFromWallet(), uTxOuts);
 
 // 보내는 트렌젝션
-const sendTx = (address, amount) => {
-  const tx = createTx(address, amount, getPrivateFromWallet(), getUTxOutList(), getMempool());
+const sendTx = (address, amount, fee = 0) => {
+  const tx = createTx(address, amount, getPrivateFromWallet(), getUTxOutList(), getMempool(), fee);
   addToMempool(tx, getUTxOutList());
   require("./p2p").broadcastMempool();
   return tx;
@@ -277,6 +337,7 @@ const handleIncomingTx = (tx) => {
 
 module.exports = {
   replaceChain,
+  getTxProof,
   calculateNewDifficulty,
   addBlockToChain,
   isBlockStructureValid,

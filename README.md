@@ -34,6 +34,62 @@ curl -X POST localhost:4002/peers -H 'Content-Type: application/json' -d '{"peer
 
 
 
+## 화폐 정책
+
+| | |
+|---|---|
+| 최소 단위 | 1 LIM = 100,000,000 lm (비트코인의 사토시에 해당) |
+| 초기 블록 보조금 | 10 LIM |
+| 반감기 | 210,000 블록마다 |
+| 총 발행량 상한 | 약 4,200,000 LIM |
+| 블록당 트랜잭션 | 최대 100개 |
+| mempool 상한 | 500건 |
+
+**프로토콜과 HTTP API 는 모두 최소 단위(lm) 정수로 주고받는다.** 부동소수점을
+쓰지 않으므로 노드마다 반올림이 갈릴 일이 없다. 사람에게 보여 줄 때만 LIM 으로
+환산한다 (`src/units.js` 의 `parseLim` / `formatLim`).
+
+```bash
+# 6 LIM 을 수수료 0.25 LIM 으로 보내기
+curl -X POST localhost:3000/transactions -H 'Content-Type: application/json' \
+  -d '{"address":"04...","amount":600000000,"fee":25000000}'
+```
+
+현재 정책은 `GET /info` 로 확인할 수 있다.
+
+### 백서와의 대응
+
+이 구현은 [Bitcoin 백서](https://bitcoin.org/bitcoin.pdf)의 다음 부분을 따른다.
+
+**6장 Incentive — 수수료와 반감기**
+
+> "If the output value of a transaction is less than its input value, the
+> difference is a transaction fee that is added to the incentive value of the
+> block containing the transaction."
+
+입력합에서 출력합을 뺀 차액이 수수료가 되고, 그 블록을 채굴한 사람이
+보조금과 함께 가져간다. 수수료를 위한 별도 출력을 만들지 않는다.
+
+> "Once a predetermined number of coins have entered circulation, the incentive
+> can transition entirely to transaction fees and be completely inflation free."
+
+보조금은 210,000 블록마다 절반이 되고 결국 0 으로 수렴한다. 그 뒤로는
+수수료만 남는다.
+
+**7장 Reclaiming Disk Space — 머클 트리**
+
+> "transactions are hashed in a Merkle Tree, with only the root included in
+> the block's hash."
+
+블록 헤더가 커밋하는 것은 `index`, `previousHash`, `timestamp`, `merkleRoot`,
+`difficulty`, `nonce` 뿐이다. 트랜잭션 목록은 머클 루트를 통해서만 묶인다.
+
+**8장 Simplified Payment Verification — 머클 증명**
+
+`GET /transactions/:id/proof` 로 특정 트랜잭션이 블록에 담겼다는 증명을
+받을 수 있다. 검증하는 쪽은 블록 전체가 아니라 헤더의 `merkleRoot` 와
+log₂(n) 개의 해시만 있으면 된다.
+
 ## 블록체인 원리 이해하기
 -----------------------------
 
@@ -128,6 +184,8 @@ curl -X POST localhost:4002/peers -H 'Content-Type: application/json' -d '{"peer
 | GET  | `/transactions` | mempool |
 | POST | `/transactions` | 송금 (`{"address":"04...","amount":10}`) |
 | GET  | `/transactions/:id` | id 로 트랜잭션 조회 |
+| GET  | `/transactions/:id/proof` | 머클(SPV) 증명 |
+| GET  | `/info` | 화폐 정책과 체인 상태 |
 | GET  | `/me/balance` | 내 잔액 |
 | GET  | `/me/address` | 내 주소 |
 | GET  | `/address/:address` | 특정 주소 잔액 |
@@ -143,6 +201,14 @@ curl -X POST localhost:4002/peers -H 'Content-Type: application/json' -d '{"peer
 7. createCoinbaseTx
 8. processTxs
 9. validateTx
+
+### units.js
+최소 단위 변환. `parseLim("1.5") === 150000000`, `formatLim(150000000) === "1.5"`
+
+### merkle.js
+1. getMerkleRoot — 트랜잭션 목록의 머클 루트
+2. getMerkleProof — 특정 트랜잭션의 포함 증명
+3. verifyMerkleProof — 루트만으로 증명 검증
 
 ### utils.js
 1. toHexString

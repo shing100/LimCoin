@@ -14,11 +14,12 @@ const CryptoJS = require("crypto-js"),
   fs = require("fs"),
   path = require("path");
 
-const { getTxId } = require("../src/transactions");
+const { getTxId, getBlockSubsidy } = require("../src/transactions");
+const { getMerkleRoot } = require("../src/merkle");
+const { formatLim } = require("../src/units");
 
 const ec = new elliptic.ec("secp256k1");
 
-const COINBASE_AMOUNT = 10;
 const GENESIS_DIFFICULTY = 15;
 
 const privateKeyLocation = path.join(__dirname, "..", "src", "privateKey");
@@ -38,9 +39,10 @@ const keyPair = ec.genKeyPair();
 const privateKey = keyPair.getPrivate().toString(16);
 const address = keyPair.getPublic().encode("hex");
 
+// 제네시스 코인베이스는 높이 0 의 보조금을 그대로 받는다(수수료 없음).
 const genesisTx = {
   txIns: [{ signature: "", txOutId: "", txOutIndex: 0 }],
-  txOuts: [{ address, amount: COINBASE_AMOUNT }],
+  txOuts: [{ address, amount: getBlockSubsidy(0) }],
   id: ""
 };
 genesisTx.id = getTxId(genesisTx);
@@ -50,17 +52,19 @@ const genesisBlock = {
   hash: "",
   previousHash: "",
   timestamp: Math.round(new Date().getTime() / 1000),
+  merkleRoot: getMerkleRoot([genesisTx]),
   data: [genesisTx],
   difficulty: GENESIS_DIFFICULTY,
   nonce: 0
 };
 
 // blockchain.js 의 createHash 와 동일한 식이어야 한다.
+// 본문이 아니라 머클 루트가 들어간다(백서 7장).
 genesisBlock.hash = CryptoJS.SHA256(
   genesisBlock.index +
     genesisBlock.previousHash +
     genesisBlock.timestamp +
-    JSON.stringify(genesisBlock.data) +
+    genesisBlock.merkleRoot +
     genesisBlock.difficulty +
     genesisBlock.nonce
 ).toString();
@@ -70,6 +74,8 @@ fs.writeFileSync(genesisLocation, JSON.stringify(genesisBlock, null, 2) + "\n");
 
 console.log("새 제네시스 블록을 만들었습니다.");
 console.log("  주소   :", address);
+console.log("  프리마인:", formatLim(genesisTx.txOuts[0].amount), "LIM");
+console.log("  머클루트:", genesisBlock.merkleRoot);
 console.log("  블록해시:", genesisBlock.hash);
 console.log("  개인키 :", privateKeyLocation, "(커밋 금지)");
 console.log("  제네시스:", genesisLocation, "(커밋 대상)");

@@ -9,11 +9,12 @@ const express = require("express"),
     Transactions = require("./transactions"),
     _ = require("lodash");
 
-const { getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList } = Blockchain;
+const { getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList, getTxProof, getNewestBlock } = Blockchain;
 const { startP2PServer, connectToPeers, getPeers } = P2P;
 const { initWallet, getPublicFromWallet, getBalance } = Wallet;
 const { getMempool } = Mempool;
-const { isAddressValid } = Transactions;
+const { isAddressValid, getBlockSubsidy, HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK } = Transactions;
+const { COIN, DECIMALS } = require("./units");
 
 const PORT = process.env.HTTP_PORT || 3000;
 
@@ -84,17 +85,48 @@ app.route("/transactions")
   })
   .post((req, res) => {
     try {
-      const { body: { address, amount } } = req;
+      const { body: { address, amount, fee = 0 } } = req;
       if (address === undefined || amount === undefined) {
-        throw Error("Please specify and address and an amount");
-      } else {
-        const resPonse = sendTx(address, amount);
-        res.send(resPonse);
+        throw Error("Please specify an address and an amount");
       }
+      // amount 와 fee 는 최소 단위(lm) 정수다. 1 LIM = 100,000,000 lm.
+      res.send(sendTx(address, amount, fee));
     } catch (e) {
       res.status(400).send(e.message);
     }
   });
+
+/*
+ * 백서 8장 "Simplified Payment Verification".
+ * 블록 전체를 받지 않고도 트랜잭션이 담겼음을 확인할 수 있는 머클 증명.
+ * 검증하는 쪽은 블록 헤더의 merkleRoot 만 있으면 된다.
+ */
+app.get("/transactions/:id/proof", (req, res) => {
+  const proof = getTxProof(req.params.id);
+  if (proof === null) {
+    res.status(404).send("Tx not found in any block");
+  } else {
+    res.send(proof);
+  }
+});
+
+// 화폐 정책과 체인 상태
+app.get("/info", (req, res) => {
+  const newest = getNewestBlock();
+  const nextIndex = newest.index + 1;
+  res.send({
+    height: newest.index,
+    difficulty: newest.difficulty,
+    coin: COIN,
+    decimals: DECIMALS,
+    initialSubsidy: INITIAL_SUBSIDY,
+    halvingInterval: HALVING_INTERVAL,
+    currentSubsidy: getBlockSubsidy(nextIndex),
+    nextHalvingAtHeight:
+      (Math.floor(nextIndex / HALVING_INTERVAL) + 1) * HALVING_INTERVAL,
+    maxTxsPerBlock: MAX_TXS_PER_BLOCK
+  });
+});
 
 app.get("/address/:address", (req, res) => {
   const { params : { address } } = req;

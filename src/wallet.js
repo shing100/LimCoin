@@ -96,14 +96,26 @@ const filterUTxOutsFromMempool = (uTxOutList, mempool) => {
   return _.without(uTxOutList, ...removables);
 };
 
-const createTx = (receiverAddress, amount, privateKey, uTxOutList, memPool) => {
+/*
+ * 수수료는 따로 출력을 만들지 않는다. 백서 6장대로 "입력합 - 출력합" 의
+ * 차액이 곧 수수료이므로, 거스름돈에서 수수료만큼 덜 돌려받으면 된다.
+ * 그래서 모아야 하는 금액은 amount 가 아니라 amount + fee 다.
+ */
+const createTx = (receiverAddress, amount, privateKey, uTxOutList, memPool, fee = 0) => {
+  if (!Number.isInteger(amount) || amount <= 0) {
+    throw Error("보내는 금액은 최소 단위 기준 양의 정수여야 합니다");
+  }
+  if (!Number.isInteger(fee) || fee < 0) {
+    throw Error("수수료는 최소 단위 기준 0 이상의 정수여야 합니다");
+  }
+
   const myAddress = getPublicKey(privateKey);
   const myUTxOuts = uTxOutList.filter(uTxO => uTxO.address === myAddress);
 
   const filteredUTxOuts = filterUTxOutsFromMempool(myUTxOuts, memPool);
 
   const { includedUTxOuts, leftOverAmount } = findAmountInUTxOuts(
-    amount,
+    amount + fee,
     filteredUTxOuts
   );
 

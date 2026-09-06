@@ -11,7 +11,8 @@ const {
   validateTx,
   processTxs,
   createCoinbaseTx,
-  isAddressValid
+  isAddressValid,
+  getBlockSubsidy
 } = require("../src/transactions");
 const { toHexString } = require("../src/utils");
 const { calculateNewDifficulty, replaceChain } = require("../src/blockchain");
@@ -89,7 +90,7 @@ test("서명이 깨진 tx 는 예외 대신 false 를 돌려준다", () => {
   assert.strictEqual(validateTx(tx, uTxOuts), false);
 });
 
-test("입력합과 출력합이 다른 tx 는 거부된다", () => {
+test("입력보다 많이 쓰는 tx 는 거부된다", () => {
   const owner = makeWallet();
   const uTxOuts = [
     { txOutId: "seed", txOutIndex: 0, address: owner.address, amount: 10 }
@@ -130,7 +131,7 @@ test("코인베이스 발행량을 부풀린 블록은 거부된다", () => {
   // 수정 전: validateCoinbaseTx 가 false 여도 return 이 없어 그냥 흘러내렸다.
   const miner = makeWallet();
   const coinbaseTx = createCoinbaseTx(miner.address, 1);
-  coinbaseTx.txOuts[0].amount = 1000000;
+  coinbaseTx.txOuts[0].amount = getBlockSubsidy(1) * 2;
   coinbaseTx.id = getTxId(coinbaseTx);
 
   assert.strictEqual(processTxs([coinbaseTx], [], 1), null);
@@ -144,7 +145,7 @@ test("정상 블록은 UTxOut 목록을 돌려준다", () => {
   assert.ok(Array.isArray(result));
   assert.strictEqual(result.length, 1);
   assert.strictEqual(result[0].address, miner.address);
-  assert.strictEqual(result[0].amount, 10);
+  assert.strictEqual(result[0].amount, getBlockSubsidy(1));
 });
 
 test("빈 블록은 거부된다", () => {
