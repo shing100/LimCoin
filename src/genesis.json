@@ -1,0 +1,27 @@
+{
+  "index": 0,
+  "hash": "2344f7d1847a62d17509b1374f69b74812f5211830999eafba008527040662b1",
+  "previousHash": "",
+  "timestamp": 1788664353,
+  "merkleRoot": "b3feb447a6e49898f94a65e68d9b624d08993d822149f0805525e2907164494e",
+  "data": [
+    {
+      "txIns": [
+        {
+          "signature": "",
+          "txOutId": "",
+          "txOutIndex": 0
+        }
+      ],
+      "txOuts": [
+        {
+          "address": "049eda86f18675fe30fe7da0ec4e42f3e0b789ee83dc777fd06e3d9e69dfef9ed005ac06ac51051d4107ac2b83bff714aecd8efa53eb50b9b79c17d3a6086558fe",
+          "amount": 1000000000
+        }
+      ],
+      "id": "b3feb447a6e49898f94a65e68d9b624d08993d822149f0805525e2907164494e"
+    }
+  ],
+  "difficulty": 15,
+  "nonce": 0
+}

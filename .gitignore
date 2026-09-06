@@ -1,0 +1,24 @@
+# 의존성
+node_modules/
+
+# 이 프로젝트는 yarn 을 쓴다. 락파일이 두 개면 서로 어긋난다.
+package-lock.json
+
+# 지갑 개인키 — 절대 커밋하지 말 것
+src/privateKey
+
+# 로그
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 환경 변수
+.env
+.env.local
+
+# 에디터 / OS
+.DS_Store
+.idea/
+.vscode/

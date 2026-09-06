@@ -3,9 +3,37 @@ const CryptoJS = require("crypto-js"),
   _ = require("lodash"),
   utils = require("./utils");
 
+const { COIN } = require("./units");
+
 const ec = new elliptic.ec("secp256k1");
 
-const COINBASE_AMOUNT = 10;
+/*
+ * 발행 정책. 백서 6장 "Incentive":
+ *
+ *   "Once a predetermined number of coins have entered circulation, the
+ *    incentive can transition entirely to transaction fees and be completely
+ *    inflation free."
+ *
+ * 예전에는 COINBASE_AMOUNT 가 10 으로 고정이라 발행량에 상한이 없었다.
+ * 비트코인과 같은 방식으로 일정 블록마다 보조금을 반으로 줄인다.
+ * 총 발행량은 210000 * 10 * 2 = 4,200,000 LIM 으로 수렴한다.
+ */
+const INITIAL_SUBSIDY = 10 * COIN;
+const HALVING_INTERVAL = 210000;
+
+// 블록에 담을 수 있는 트랜잭션 수 상한(코인베이스 포함).
+// 예전에는 mempool 전체를 그대로 담아서 스팸을 막을 방법이 없었다.
+const MAX_TXS_PER_BLOCK = 100;
+
+// 해당 높이의 블록 보조금. 반감이 거듭되면 0 으로 수렴하고,
+// 그 뒤로는 백서대로 수수료만 남는다.
+const getBlockSubsidy = blockIndex => {
+  const halvings = Math.floor(blockIndex / HALVING_INTERVAL);
+  if (halvings >= 64) {
+    return 0;
+  }
+  return Math.floor(INITIAL_SUBSIDY / Math.pow(2, halvings));
+};
 
 class TxOut {
   constructor(address, amount) {
@@ -45,7 +73,7 @@ const getTxId = tx => {
     .map(txOut => txOut.address + txOut.amount)
     .reduce((a, b) => a + b, "");
 
-  return CryptoJS.SHA256(txInContent + txOutContent + tx.timestamp).toString();
+  return CryptoJS.SHA256(txInContent + txOutContent).toString();
 };
 
 // genesisTx id 값을 알아내기 위한 로그
@@ -68,7 +96,6 @@ const signTxIn = (tx, txInIndex, privateKey, uTxOutList) => {
   // 참조 TxOut 체크하기
   if (referencedUTxOut === null || referencedUTxOut === undefined) {
     throw Error("Couldn't find the referenced uTxOut, not signing");
-    return;
   }
   const referencedAddress = referencedUTxOut.address;
   if (getPublicKey(privateKey) !== referencedAddress) {
@@ -142,6 +169,14 @@ const isAddressValid = address => {
   }
 };
 
+// 금액은 최소 단위(lm) 기준 정수여야 한다.
+// 소수를 허용하면 노드마다 반올림이 갈려 합의가 깨진다.
+const isAmountValid = amount =>
+  typeof amount === "number" &&
+  Number.isInteger(amount) &&
+  amount > 0 &&
+  amount <= Number.MAX_SAFE_INTEGER;
+
 // TxOut 구초체 유효성 검사
 const isTxOutStructureValid = txOut => {
   if (txOut === null) {
@@ -152,7 +187,7 @@ const isTxOutStructureValid = txOut => {
   } else if (!isAddressValid(txOut.address)) {
     console.log("The txOut doesn't have a valid address");
     return false;
-  } else if (typeof txOut.amount !== "number") {
+  } else if (!isAmountValid(txOut.amount)) {
     console.log("The txOut doesn't have a valid amount");
     return false;
   } else {
@@ -195,13 +230,38 @@ const validateTxIn = (txIn, tx, uTxOutList) => {
     return false;
   } else {
     const address = wantedTxOut.address;
-    const key = ec.keyFromPublic(address, "hex");
-    return key.verify(tx.id, txIn.signature);
+    try {
+      const key = ec.keyFromPublic(address, "hex");
+      return key.verify(tx.id, txIn.signature) === true;
+    } catch (e) {
+      console.log(`Couldn't verify the signature of a txIn: ${e.message}`);
+      return false;
+    }
   }
 };
 
-const getAmountInTxIn = (txIn, uTxOutList) =>
-  findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOutList).amount;
+const getAmountInTxIn = (txIn, uTxOutList) => {
+  const uTxOut = findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOutList);
+  return uTxOut === undefined ? 0 : uTxOut.amount;
+};
+
+const sumTxIns = (tx, uTxOutList) =>
+  tx.txIns.map(txIn => getAmountInTxIn(txIn, uTxOutList)).reduce((a, b) => a + b, 0);
+
+const sumTxOuts = tx =>
+  tx.txOuts.map(txOut => txOut.amount).reduce((a, b) => a + b, 0);
+
+/*
+ * 백서 6장:
+ *
+ *   "If the output value of a transaction is less than its input value, the
+ *    difference is a transaction fee that is added to the incentive value of
+ *    the block containing the transaction."
+ *
+ * 예전에는 입력합과 출력합이 정확히 같아야만 통과시켰다. 그래서 수수료를
+ * 낼 방법이 아예 없었고, 채굴자에게는 보조금 말고 아무 유인이 없었다.
+ */
+const getTxFee = (tx, uTxOutList) => sumTxIns(tx, uTxOutList) - sumTxOuts(tx);
 
 const validateTx = (tx, uTxOutList) => {
   if (!isTxStructureValid(tx)) {
@@ -214,34 +274,27 @@ const validateTx = (tx, uTxOutList) => {
     return false;
   }
 
-  const hasValidTxIns = tx.txIns.map(txIn =>
-    validateTxIn(txIn, tx, uTxOutList)
-  );
+  const hasValidTxIns = tx.txIns
+    .map(txIn => validateTxIn(txIn, tx, uTxOutList))
+    .every(isValid => isValid === true);
 
   if (!hasValidTxIns) {
     console.log(`The tx: ${tx} doesn't have valid txIns`);
     return false;
   }
 
-  const amountInTxIns = tx.txIns
-    .map(txIn => getAmountInTxIn(txIn, uTxOutList))
-    .reduce((a, b) => a + b, 0);
-
-  const amountInTxOuts = tx.txOuts
-    .map(txOut => txOut.amount)
-    .reduce((a, b) => a + b, 0);
-
-  if (amountInTxIns !== amountInTxOuts) {
-    console.log(
-      `The tx: ${tx} doesn't have the same amount in the txOut as in the txIns`
-    );
+  // 출력이 입력보다 많으면 무에서 돈을 만들어 내는 것이다.
+  // 반대로 모자란 만큼은 수수료로 채굴자에게 간다.
+  const fee = getTxFee(tx, uTxOutList);
+  if (fee < 0) {
+    console.log(`The tx: ${tx.id} spends more than its inputs hold`);
     return false;
-  } else {
-    return true;
   }
+  return true;
 };
 
-const validateCoinbaseTx = (tx, blockIndex) => {
+const validateCoinbaseTx = (tx, blockIndex, totalFees = 0) => {
+  const expected = getBlockSubsidy(blockIndex) + totalFees;
   if (getTxId(tx) !== tx.id) {
     console.log("Invalid Coinbase tx ID");
     return false;
@@ -256,11 +309,12 @@ const validateCoinbaseTx = (tx, blockIndex) => {
   } else if (tx.txOuts.length !== 1) {
     console.log("Coinbase TX should only have one output");
     return false;
-  } else if (tx.txOuts[0].amount !== COINBASE_AMOUNT) {
+  } else if (tx.txOuts[0].amount !== expected) {
+    // 보조금을 부풀리거나, 담기지도 않은 수수료를 챙기려는 블록을 막는다
     console.log(
-      `Coinbase TX should have an amount of only ${COINBASE_AMOUNT} and it has ${
-        tx.txOuts[0].amount
-      }`
+      `Coinbase TX should pay exactly ${expected} (subsidy ${getBlockSubsidy(
+        blockIndex
+      )} + fees ${totalFees}) but pays ${tx.txOuts[0].amount}`
     );
     return false;
   } else {
@@ -269,14 +323,14 @@ const validateCoinbaseTx = (tx, blockIndex) => {
 };
 
 // 코인 기반 트렌젝션 가져오기
-const createCoinbaseTx = (address, blockIndex) => {
+const createCoinbaseTx = (address, blockIndex, totalFees = 0) => {
   const tx = new Transaction();
   const txIn = new TxIn();
   txIn.signature = "";
   txIn.txOutId = "";
   txIn.txOutIndex = blockIndex;
   tx.txIns = [txIn];
-  tx.txOuts = [new TxOut(address, COINBASE_AMOUNT)];
+  tx.txOuts = [new TxOut(address, getBlockSubsidy(blockIndex) + totalFees)];
   tx.id = getTxId(tx);
   return tx;
 };
@@ -297,9 +351,16 @@ const hasDuplicates = txIns => {
 };
 
 const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
-  const coinbaseTx = txs[0];
-  if (!validateCoinbaseTx(coinbaseTx, blockIndex)) {
-    console.log("Coinbase Tx is invalid");
+  if (!(txs instanceof Array) || txs.length === 0) {
+    console.log("A block must contain at least a coinbase tx");
+    return false;
+  }
+
+  if (txs.length > MAX_TXS_PER_BLOCK) {
+    console.log(
+      `A block may hold at most ${MAX_TXS_PER_BLOCK} txs, this one has ${txs.length}`
+    );
+    return false;
   }
 
   const txIns = _(txs)
@@ -312,11 +373,34 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
     return false;
   }
 
-  const nonCoinbaseTxs = txs.slice(1);
+  /*
+   * 같은 id 를 가진 트랜잭션이 한 블록에 두 번 들어오면, 머클 트리가 홀수
+   * 개의 잎을 마지막 것으로 복제해 채우는 성질 때문에 서로 다른 트랜잭션
+   * 집합이 같은 머클 루트를 갖게 만들 수 있다(비트코인 CVE-2012-2459).
+   * 위의 txIn 중복 검사로도 대부분 걸리지만 명시적으로 막아 둔다.
+   */
+  if (_.uniqBy(txs, tx => tx.id).length !== txs.length) {
+    console.log("Found duplicated tx ids");
+    return false;
+  }
 
-  return nonCoinbaseTxs
-    .map(tx => validateTx(tx, uTxOutList))
-    .reduce((a, b) => a + b, true);
+  // 일반 트랜잭션을 먼저 검증해야 코인베이스가 가져갈 수수료 합을 알 수 있다
+  const nonCoinbaseTxs = txs.slice(1);
+  let totalFees = 0;
+  for (const tx of nonCoinbaseTxs) {
+    if (!validateTx(tx, uTxOutList)) {
+      console.log(`The tx ${tx.id} in this block is invalid`);
+      return false;
+    }
+    totalFees += getTxFee(tx, uTxOutList);
+  }
+
+  if (!validateCoinbaseTx(txs[0], blockIndex, totalFees)) {
+    console.log("Coinbase Tx is invalid");
+    return false;
+  }
+
+  return true;
 };
 
 // Tx 프로세스
@@ -329,6 +413,12 @@ const processTxs = (txs, uTxOutList, blockIndex) => {
 
 module.exports = {
   getPublicKey,
+  isAddressValid,
+  getBlockSubsidy,
+  getTxFee,
+  HALVING_INTERVAL,
+  INITIAL_SUBSIDY,
+  MAX_TXS_PER_BLOCK,
   getTxId,
   signTxIn,
   TxIn,

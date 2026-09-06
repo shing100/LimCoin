@@ -1,7 +1,94 @@
 # LimCoin
 LimCoin, the coin made in NodeJS
 
+## 시작하기
 
+```bash
+yarn install
+yarn genesis      # 최초 1회: 제네시스 블록과 지갑 개인키 생성
+yarn dev          # 개발 서버 (nodemon)
+yarn test         # 검증 로직 테스트
+```
+
+기본 포트는 3000. `HTTP_PORT` 환경변수로 바꿀 수 있다.
+여러 노드를 띄우려면 각각 다른 포트로 실행한 뒤 `POST /peers` 로 연결한다.
+
+```bash
+HTTP_PORT=4001 yarn start
+HTTP_PORT=4002 yarn start
+curl -X POST localhost:4002/peers -H 'Content-Type: application/json' -d '{"peer":"ws://localhost:4001"}'
+```
+
+### 제네시스 블록과 개인키
+
+- `src/genesis.json` — 제네시스 블록. **공개 정보이며 커밋 대상**이다.
+  체인에 참여하는 모든 노드가 같은 파일을 공유해야 한다.
+- `src/privateKey` — 노드 지갑의 개인키. **`.gitignore` 대상이며 절대 커밋하면 안 된다.**
+  없으면 서버가 처음 뜰 때 자동 생성된다.
+
+새 체인을 시작하려면 `yarn genesis` 를 실행한다. 제네시스 프리마인(10 LIM)은
+그때 만들어진 `src/privateKey` 를 가진 사람만 쓸 수 있으므로, 이 키를 안전한 곳에 보관할 것.
+
+> 과거 버전은 제네시스 주소의 개인키를 `src/privateKey` 로 저장소에 함께 커밋했다.
+> 그 주소는 폐기되었고, 해당 키는 더 이상 사용해서는 안 된다.
+
+
+
+## 화폐 정책
+
+| | |
+|---|---|
+| 최소 단위 | 1 LIM = 100,000,000 lm (비트코인의 사토시에 해당) |
+| 초기 블록 보조금 | 10 LIM |
+| 반감기 | 210,000 블록마다 |
+| 총 발행량 상한 | 약 4,200,000 LIM |
+| 블록당 트랜잭션 | 최대 100개 |
+| mempool 상한 | 500건 |
+
+**프로토콜과 HTTP API 는 모두 최소 단위(lm) 정수로 주고받는다.** 부동소수점을
+쓰지 않으므로 노드마다 반올림이 갈릴 일이 없다. 사람에게 보여 줄 때만 LIM 으로
+환산한다 (`src/units.js` 의 `parseLim` / `formatLim`).
+
+```bash
+# 6 LIM 을 수수료 0.25 LIM 으로 보내기
+curl -X POST localhost:3000/transactions -H 'Content-Type: application/json' \
+  -d '{"address":"04...","amount":600000000,"fee":25000000}'
+```
+
+현재 정책은 `GET /info` 로 확인할 수 있다.
+
+### 백서와의 대응
+
+이 구현은 [Bitcoin 백서](https://bitcoin.org/bitcoin.pdf)의 다음 부분을 따른다.
+
+**6장 Incentive — 수수료와 반감기**
+
+> "If the output value of a transaction is less than its input value, the
+> difference is a transaction fee that is added to the incentive value of the
+> block containing the transaction."
+
+입력합에서 출력합을 뺀 차액이 수수료가 되고, 그 블록을 채굴한 사람이
+보조금과 함께 가져간다. 수수료를 위한 별도 출력을 만들지 않는다.
+
+> "Once a predetermined number of coins have entered circulation, the incentive
+> can transition entirely to transaction fees and be completely inflation free."
+
+보조금은 210,000 블록마다 절반이 되고 결국 0 으로 수렴한다. 그 뒤로는
+수수료만 남는다.
+
+**7장 Reclaiming Disk Space — 머클 트리**
+
+> "transactions are hashed in a Merkle Tree, with only the root included in
+> the block's hash."
+
+블록 헤더가 커밋하는 것은 `index`, `previousHash`, `timestamp`, `merkleRoot`,
+`difficulty`, `nonce` 뿐이다. 트랜잭션 목록은 머클 루트를 통해서만 묶인다.
+
+**8장 Simplified Payment Verification — 머클 증명**
+
+`GET /transactions/:id/proof` 로 특정 트랜잭션이 블록에 담겼다는 증명을
+받을 수 있다. 검증하는 쪽은 블록 전체가 아니라 헤더의 `merkleRoot` 와
+log₂(n) 개의 해시만 있으면 된다.
 
 ## 블록체인 원리 이해하기
 -----------------------------
@@ -44,8 +131,7 @@ LimCoin, the coin made in NodeJS
 - body-parser
 - morgan
 - cors
-- crypto, crypto-js
-- js
+- crypto-js
 - lodash
 - nodemon
 - ws
@@ -55,12 +141,10 @@ LimCoin, the coin made in NodeJS
 ### Version infomation
     "body-parser": "^1.18.2",
     "cors": "^2.8.4",
-    "crypto": "^1.0.1",
     "crypto-js": "^3.1.9-1",
     "elliptic": "^6.4.0",
     "express": "^4.16.3",
     "hex-to-binary": "^1.0.1",
-    "js": "^0.1.0",
     "lodash": "^4.17.10",
     "morgan": "^1.9.0",
     "nodemon": "^1.17.3",
@@ -84,17 +168,27 @@ LimCoin, the coin made in NodeJS
 1. startP2PServer
 2. connectToPeers
 3. broadcastNewBlock
-4. broadcastMempool 
+4. broadcastMempool
+5. getPeers
 
 ### server.js
-1. /blocks
-2. /blocks/:hash
-3. /peers
-4. /transactions
-5. /transactions/:id
-6. /me/balance
-7. /me/address
-8. /address/:address 
+`start(port)` 로 HTTP + P2P 서버를 띄운다. `node src/server.js` 로 직접 실행하면 자동으로 뜬다.
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| GET  | `/blocks` | 전체 블록체인 |
+| POST | `/blocks` | 새 블록 채굴 |
+| GET  | `/blocks/:hash` | 해시로 블록 조회 |
+| GET  | `/peers` | 연결된 피어 목록 |
+| POST | `/peers` | 피어 연결 (`{"peer":"ws://host:port"}`) |
+| GET  | `/transactions` | mempool |
+| POST | `/transactions` | 송금 (`{"address":"04...","amount":10}`) |
+| GET  | `/transactions/:id` | id 로 트랜잭션 조회 |
+| GET  | `/transactions/:id/proof` | 머클(SPV) 증명 |
+| GET  | `/info` | 화폐 정책과 체인 상태 |
+| GET  | `/me/balance` | 내 잔액 |
+| GET  | `/me/address` | 내 주소 |
+| GET  | `/address/:address` | 특정 주소 잔액 |
 
 
 ### transaction.js
@@ -108,8 +202,19 @@ LimCoin, the coin made in NodeJS
 8. processTxs
 9. validateTx
 
+### units.js
+최소 단위 변환. `parseLim("1.5") === 150000000`, `formatLim(150000000) === "1.5"`
+
+### merkle.js
+1. getMerkleRoot — 트랜잭션 목록의 머클 루트
+2. getMerkleProof — 특정 트랜잭션의 포함 증명
+3. verifyMerkleProof — 루트만으로 증명 검증
+
 ### utils.js
 1. toHexString
+
+### scripts/generate-genesis.js
+제네시스 블록(`src/genesis.json`)과 지갑 개인키(`src/privateKey`)를 새로 만든다.
 
 ### wallet.js
 1. initWallet
