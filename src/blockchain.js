@@ -7,6 +7,7 @@ const _ = require("lodash"),
   AddressIndex = require("./addressIndex"),
   PoW = require("./pow"),
   { Worker } = require("worker_threads"),
+  os = require("os"),
   path = require("path");
 
 // 해시 계산은 워커와 함께 쓰므로 pow.js 에 따로 두었다
@@ -16,7 +17,7 @@ const { getMerkleRoot, getMerkleProof } = Merkle;
 
 const { getWalletBalance, getPublicFromWallet, createTx } = Wallet;
 
-const { createCoinbaseTx, processTxs, getTxFee, MAX_TXS_PER_BLOCK } = Transactions;
+const { createCoinbaseTx, processTxs, updateUTxOuts, getTxFee, MAX_TXS_PER_BLOCK } = Transactions;
 
 const { addToMempool, getMempool, updateMempool, selectTxsForBlock } = Mempool;
 
@@ -111,7 +112,7 @@ const createNewRawBlock = async data => {
   const newBlockIndex = previousBlock.index + 1;
   const newTimestamp = getTimestamp();
   const difficulty = findDifficulty();
-  const mining = findBlockInWorker(
+  const mining = findBlockInWorkers(
     newBlockIndex,
     previousBlock.hash,
     newTimestamp,
@@ -119,16 +120,26 @@ const createNewRawBlock = async data => {
     difficulty
   );
 
-  // 다른 노드가 먼저 블록을 올리면 헛돌지 않고 멈춘다
+  /*
+   * 다른 노드가 먼저 블록을 올리면 헛돌지 않고 멈춘다.
+   *
+   * 워커에 중단을 알리는 것만으로는 promise 가 풀리지 않으므로
+   * (워커는 아무 답도 보내지 않는다) 여기서 직접 거절한다.
+   */
+  let staleReject;
+  const stale = new Promise((resolve, reject) => { staleReject = reject; });
   const cancelIfStale = setInterval(() => {
     if (getNewestBlock().hash !== previousBlock.hash) {
       mining.cancel();
+      staleReject(Error("채굴하는 동안 다른 블록이 먼저 들어왔습니다. 다시 시도하세요."));
     }
   }, 500);
+  // 아무도 안 받으면 unhandled rejection 으로 잡히므로 미리 삼켜 둔다
+  stale.catch(() => {});
 
   let newBlock;
   try {
-    newBlock = await mining;
+    newBlock = await Promise.race([mining, stale]);
   } finally {
     clearInterval(cancelIfStale);
   }
@@ -175,47 +186,116 @@ const calculateNewDifficulty = (newestBlock, blockchain) => {
  * 그러면 HTTP 응답이 막히지는 않지만 채굴과 서버가 한 코어를 나눠 쓴다.
  * 워커로 빼면 채굴이 다른 코어에서 돌고 메인 스레드는 손대지 않는다.
  *
- * 반환된 promise 에 cancel() 이 붙어 있다 — 다른 노드가 먼저 블록을
- * 올렸을 때 헛돌지 않고 멈추기 위한 것이다.
+ * 워커는 풀로 살려 두고 일감만 보낸다. 블록마다 새로 띄우면 띄우는 값이
+ * 채굴 시간보다 커질 수 있다 — 4코어에서 재 보니 워커 4개가 2개보다
+ * 느렸다.
+ *
+ * 워커 k 는 k 부터 시작해 워커 수만큼씩 건너뛰므로 서로 겹치지 않는다.
+ * 먼저 찾은 하나가 이기고 나머지에는 중단을 알린다.
  */
 const WORKER_PATH = path.join(__dirname, "pow-worker.js");
 
-const findBlockInWorker = (index, previousHash, timestamp, data, difficulty) => {
+const minerThreads = () => {
+  const configured = Number.parseInt(process.env.LIMCOIN_MINER_THREADS, 10);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  // 메인 스레드가 쓸 코어 하나는 남긴다
+  return Math.max(1, os.cpus().length - 1);
+};
+
+let pool = null;
+let jobCounter = 0;
+
+const getPool = () => {
+  if (pool !== null) {
+    return pool;
+  }
+  pool = [];
+  for (let i = 0; i < minerThreads(); i++) {
+    const worker = new Worker(WORKER_PATH);
+    // 풀 때문에 프로세스가 안 끝나는 일이 없게 한다
+    worker.unref();
+    pool.push(worker);
+  }
+  return pool;
+};
+
+// 풀을 정리한다. 프로세스를 깔끔히 끝낼 때 쓴다.
+const stopMiners = async () => {
+  if (pool === null) {
+    return;
+  }
+  const workers = pool;
+  pool = null;
+  await Promise.all(workers.map(worker => worker.terminate()));
+};
+
+const findBlockInWorkers = (index, previousHash, timestamp, data, difficulty) => {
   const merkleRoot = getMerkleRoot(data);
   const header = { index, previousHash, timestamp, merkleRoot, difficulty };
 
-  let worker;
-  const promise = new Promise((resolve, reject) => {
-    worker = new Worker(WORKER_PATH, { workerData: header });
+  const workers = getPool();
+  const stride = workers.length;
+  const jobId = ++jobCounter;
 
-    worker.on("message", message => {
-      if (message.type === "found") {
-        resolve(
+  const handlers = [];
+  let settled = false;
+
+  const release = () => {
+    for (const [worker, onMessage, onError] of handlers) {
+      worker.removeListener("message", onMessage);
+      worker.removeListener("error", onError);
+      // 아직 도는 워커가 있으면 세운다
+      worker.postMessage({ type: "stop", jobId });
+    }
+  };
+
+  const promise = new Promise((resolve, reject) => {
+    const finish = fn => value => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      release();
+      fn(value);
+    };
+    const win = finish(resolve);
+    const fail = finish(reject);
+
+    workers.forEach((worker, k) => {
+      const onMessage = message => {
+        // 지난 일감의 결과가 늦게 도착할 수 있다
+        if (message.jobId !== jobId || message.type !== "found") {
+          return;
+        }
+        win(
           new Block(
             index, message.hash, previousHash, timestamp,
             merkleRoot, data, difficulty, message.nonce
           )
         );
-      } else {
-        reject(Error("채굴이 취소되었습니다"));
-      }
-      worker.terminate();
-    });
+      };
+      const onError = error => fail(error);
 
-    worker.on("error", error => {
-      worker.terminate();
-      reject(error);
-    });
-    worker.on("exit", code => {
-      // 정상 종료(terminate)는 코드 1 로 끝난다. 이미 resolve/reject 된
-      // promise 에 다시 부르는 것은 무시되므로 그대로 둔다.
-      if (code !== 0 && code !== 1) {
-        reject(Error(`채굴 워커가 코드 ${code} 로 종료되었습니다`));
-      }
+      worker.on("message", onMessage);
+      worker.on("error", onError);
+      handlers.push([worker, onMessage, onError]);
+
+      worker.postMessage({ type: "mine", jobId, header, from: k, stride });
     });
   });
 
-  promise.cancel = () => worker.postMessage("stop");
+  // 다른 노드가 먼저 블록을 올렸을 때 헛돌지 않게 한다
+  promise.cancel = () => {
+    if (settled) {
+      return;
+    }
+    for (const worker of workers) {
+      worker.postMessage({ type: "stop", jobId });
+    }
+  };
+  promise.threads = stride;
   return promise;
 };
 
@@ -266,7 +346,34 @@ const isBlockStructureValid = (block) => {
   );
 };
 
-// 블록체인 유효성 검사하기
+/**
+ * 두 체인이 앞에서부터 몇 블록이나 같은지 센다.
+ * 해시가 같으면 그 블록은 같은 블록이다.
+ */
+const countCommonPrefix = (a, b) => {
+  const limit = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < limit && a[i].hash === b[i].hash) {
+    i++;
+  }
+  return i;
+};
+
+/**
+ * 후보 체인을 검증한다.
+ *
+ * 통과하면 { chain, uTxOuts } 를, 아니면 null 을 돌려준다.
+ *
+ * 우리 체인과 앞부분이 같으면 그 블록들은 이미 검증해 둔 것이다. 해시가
+ * 같으면 헤더가 같고, 헤더는 머클 루트를, 머클 루트는 트랜잭션 id 를,
+ * 트랜잭션 id 는 그 내용을 덮는다. 그러니 겹치는 만큼은 서명 검증을
+ * 건너뛰고 UTxOut 재생만 한다 — reorg 비용을 결정하는 것은 서명 검증이다.
+ *
+ * 다만 돌려주는 chain 의 앞부분은 *우리* 블록으로 채운다. 트랜잭션 id 는
+ * 서명을 덮지 않으므로, 해시가 같으면서 서명 바이트만 다른 블록을 보낼 수
+ * 있다. UTxOut 결과는 같지만 그걸 저장해 두면 남에게 거부당하는 블록을
+ * 갖게 된다.
+ */
 const isChainValid = (candidateChain) => {
     if(!(candidateChain instanceof Array) || candidateChain.length === 0){
       console.log('The candidate chain is empty');
@@ -274,21 +381,28 @@ const isChainValid = (candidateChain) => {
     }
     /*
      * JSON.stringify 로 비교하면 키 순서가 곧 합의 규칙이 된다.
-     * 해시는 index, previousHash, timestamp, merkleRoot, difficulty, nonce 를
-     * 모두 덮고, merkleRoot 가 트랜잭션 id 를, 트랜잭션 id 가 그 내용을
-     * 덮으므로 해시 + 머클 루트 대조로 충분하다.
+     * 해시 + 머클 루트 대조로 충분하다.
      */
     const isGenesisValid = block =>
       block.hash === genesisBlock.hash &&
       getMerkleRoot(block.data) === genesisBlock.merkleRoot;
+
     if(!isGenesisValid(candidateChain[0])){
       console.log('The candidateChains genesisBlock is not the same as our genesisBlock');
       return null;
     };
-    // 다른 포트에도 TxOUt 을 적용하기 위한 단계
+
+    const common = countCommonPrefix(blockchain, candidateChain);
+    const chain = blockchain.slice(0, common);
     let foreignUTxOuts = [];
 
     for(let i=0; i<candidateChain.length; i++){
+      if (i < common) {
+        // 이미 검증한 블록. 서명 검증 없이 UTxOut 만 재생한다.
+        foreignUTxOuts = updateUTxOuts(chain[i].data, foreignUTxOuts);
+        continue;
+      }
+
       const currentBlock = candidateChain[i];
       if(i !== 0 && !isBlockValid(currentBlock, candidateChain[i-1])){
         return null;
@@ -299,8 +413,9 @@ const isChainValid = (candidateChain) => {
       if(foreignUTxOuts === null){
         return null;
       }
+      chain.push(currentBlock);
     };
-    return foreignUTxOuts;
+    return { chain, uTxOuts: foreignUTxOuts };
 };
 // 난이도 구분하기
 const sumDifficulty = anyBlockchain =>
@@ -310,18 +425,17 @@ const sumDifficulty = anyBlockchain =>
     .reduce((a,b) => a + b, 0);
 // 블록체인 재배치
 const replaceChain = candidateChain => {
-  const foreignUTxOuts = isChainValid(candidateChain);
-  const validChain = foreignUTxOuts !== null;
+  const validated = isChainValid(candidateChain);
   if(
-    validChain &&
+    validated !== null &&
     sumDifficulty(candidateChain) > sumDifficulty(getBlockChain())
   ){
     // 되돌려지는 블록에 담겼던 트랜잭션은 아직 유효할 수 있다.
     // 예전에는 그대로 사라져 버렸다.
-    const orphaned = collectOrphanedTxs(blockchain, candidateChain);
+    const orphaned = collectOrphanedTxs(blockchain, validated.chain);
 
-    blockchain = candidateChain;
-    uTxOuts = foreignUTxOuts;
+    blockchain = validated.chain;
+    uTxOuts = validated.uTxOuts;
     // 밀려난 블록의 기록이 남으면 안 되므로 통째로 다시 만든다
     rebuildAddressIndex();
     updateMempool(uTxOuts);
@@ -525,6 +639,8 @@ const handleIncomingTxs = txs => {
 
 module.exports = {
   replaceChain,
+  countCommonPrefix,
+  stopMiners,
   initChain,
   rebuildAddressIndex,
   getTxProof,

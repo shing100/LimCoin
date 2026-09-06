@@ -23,18 +23,21 @@ const hashMatchesDifficulty = (hash, difficulty) => {
 /**
  * 조건을 만족하는 nonce 를 찾는다.
  *
- * `budget` 만큼만 돌아 보고 못 찾으면 null 을 돌려준다. 부르는 쪽이
- * 중간에 다른 일을 할 수 있게 하기 위한 것이다 — 워커에서는 중단 신호를
- * 확인하고, 메인 스레드에서는 이벤트 루프에 양보한다.
+ * `budget` 번만 시도해 보고 못 찾으면 null 을 돌려준다. 부르는 쪽이 중간에
+ * 다른 일을 할 수 있게 하기 위한 것이다 — 워커에서는 중단 신호를 확인한다.
+ *
+ * `stride` 는 여러 워커가 겹치지 않게 나눠 돌 때 쓴다. 워커 k 가
+ * from=k, stride=N 으로 돌면 nonce 공간을 N 등분해 맡는다.
  */
-const findNonce = (header, from, budget) => {
+const findNonce = (header, from, budget, stride = 1) => {
   const { index, previousHash, timestamp, merkleRoot, difficulty } = header;
-  const until = from + budget;
-  for (let nonce = from; nonce < until; nonce++) {
+  let nonce = from;
+  for (let i = 0; i < budget; i++) {
     const hash = createHash(index, previousHash, timestamp, merkleRoot, difficulty, nonce);
     if (hashMatchesDifficulty(hash, difficulty)) {
       return { nonce, hash };
     }
+    nonce += stride;
   }
   return null;
 };

@@ -136,9 +136,16 @@ const updateUTxOuts = (newTxs, uTxOutList) => {
       .map(txIn => keyOf(txIn.txOutId, txIn.txOutIndex))
   );
 
+  /*
+   * 새 출력을 먼저 붙이고 나서 쓰인 것을 걷어 낸다.
+   *
+   * 순서가 반대면, 같은 블록 안에서 만들어지고 바로 쓰인 출력이 살아남는다
+   * (걷어 낸 뒤에 붙이므로 spent 검사를 피해 간다). 그러면 이미 쓴 코인이
+   * UTxOut 집합에 남아 두 번 쓸 수 있게 된다.
+   */
   return uTxOutList
-    .filter(uTxO => !spent.has(outpointKey(uTxO)))
-    .concat(newUTxOuts);
+    .concat(newUTxOuts)
+    .filter(uTxO => !spent.has(outpointKey(uTxO)));
 };
 
 // TxIn 구조체 유효성 검사
@@ -357,6 +364,22 @@ const hasDuplicates = txIns => {
     .includes(true);
 };
 
+/*
+ * 트랜잭션 하나를 색인에 반영한다. 쓴 것은 빼고 만든 것은 넣는다.
+ * 블록을 검증하는 동안 뒤 트랜잭션이 앞 트랜잭션의 출력을 볼 수 있게 한다.
+ */
+const applyTxToIndex = (tx, uTxOuts) => {
+  for (const txIn of tx.txIns) {
+    uTxOuts.delete(keyOf(txIn.txOutId, txIn.txOutIndex));
+  }
+  tx.txOuts.forEach((txOut, index) => {
+    uTxOuts.set(
+      keyOf(tx.id, index),
+      new UTxOut(tx.id, index, txOut.address, txOut.amount)
+    );
+  });
+};
+
 const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
   if (!(txs instanceof Array) || txs.length === 0) {
     console.log("A block must contain at least a coinbase tx");
@@ -394,10 +417,11 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
   /*
    * 일반 트랜잭션을 먼저 검증해야 코인베이스가 가져갈 수수료 합을 알 수 있다.
    *
-   * 색인은 이 블록을 적용하기 *전*의 UTxOut 으로 만든다. 곧 같은 블록 안에서
-   * 앞선 트랜잭션이 만든 출력을 뒤 트랜잭션이 쓰는 것(in-block chaining)은
-   * 허용되지 않는다. 어차피 addToMempool 이 확정된 UTxOut 만 보고 검증하므로
-   * 그런 트랜잭션은 mempool 에 들어오지도 못한다.
+   * 색인은 트랜잭션을 하나씩 검증하면서 함께 갱신한다. 그래야 같은 블록
+   * 안에서 앞선 트랜잭션이 만든 출력을 뒤 트랜잭션이 쓸 수 있다
+   * (in-block chaining). 블록 이전의 UTxOut 만 보면 그런 블록을 거부하게 된다.
+   *
+   * 같은 outpoint 를 두 번 쓰는 것은 위의 hasDuplicates 가 이미 막는다.
    */
   const nonCoinbaseTxs = txs.slice(1);
   const uTxOuts = indexByOutpoint(uTxOutList);
@@ -407,7 +431,9 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
       console.log(`The tx ${tx.id} in this block is invalid`);
       return false;
     }
+    // 수수료는 입력을 걷어 내기 전에 구해야 한다
     totalFees += getTxFee(tx, uTxOuts);
+    applyTxToIndex(tx, uTxOuts);
   }
 
   if (!validateCoinbaseTx(txs[0], blockIndex, totalFees)) {
@@ -427,6 +453,7 @@ const processTxs = (txs, uTxOutList, blockIndex) => {
 };
 
 module.exports = {
+  updateUTxOuts,
   getPublicKey,
   isAddressValid,
   getBlockSubsidy,
