@@ -112,6 +112,22 @@ const derivePrivateKey = (seedHex, branch, index) => {
   return toHex32(deriveChild(deriveChild(master, branch), index).key);
 };
 
+/**
+ * 같은 갈래에서 여러 개를 뽑는다.
+ * 마스터와 갈래 노드를 한 번만 파생하므로 낱개로 부르는 것보다 싸다.
+ */
+const deriveRange = (seedHex, branch, from, count) => {
+  if (count <= 0) {
+    return [];
+  }
+  const branchNode = deriveChild(masterFromSeed(seedHex), branch);
+  const keys = [];
+  for (let i = from; i < from + count; i++) {
+    keys.push(toHex32(deriveChild(branchNode, i).key));
+  }
+  return keys;
+};
+
 const getPublicKey = privateKeyHex =>
   ec
     .keyFromPrivate(privateKeyHex, "hex")
@@ -123,6 +139,7 @@ module.exports = {
   masterFromSeed,
   deriveChild,
   derivePrivateKey,
+  deriveRange,
   getPublicKey,
   RECEIVE,
   CHANGE,

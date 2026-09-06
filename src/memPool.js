@@ -2,6 +2,7 @@ const _ = require("lodash"),
   Transactions = require("./transactions");
 
 const { validateTx, getTxFee } = Transactions;
+const { keyOf, indexByOutpoint } = require("./utxo");
 
 // mempool 에 무한정 쌓이지 않게 상한을 둔다.
 // 예전에는 제한이 없어 스팸 트랜잭션으로 메모리를 밀어낼 수 있었다.
@@ -11,54 +12,43 @@ let mempool = [];
 
 const getMempool = () => _.cloneDeep(mempool);
 
-const getTxInsInPool = mempool => {
-  return _(mempool).map(tx => tx.txIns).flatten().value();
-};
-
-const isTxValidForPool = (tx, mempool) => {
-  const txInsInPool = getTxInsInPool(mempool);
-
-  const isTxInAlreadyInPool = (txIns, txIn) => {
-    return _.find(txIns, txInInPool => {
-      return (
-        txIn.txOutIndex === txInInPool.txOutIndex &&
-      txIn.txOutId === txInInPool.txOutId
-      );
-    });
-  };
-
-  for (const txIn of tx.txIns) {
-    if (isTxInAlreadyInPool(txInsInPool, txIn)) {
-      return false;
-    }
-  }
-  return true;
-};
-
-const hasTxIn = (txIn, uTxOutList) => {
-  const foundTxIn = uTxOutList.find(
-    uTxO => uTxO.txOutId === txIn.txOutId && uTxO.txOutIndex === txIn.txOutIndex
-  );
-
-  return foundTxIn !== undefined;
-};
-
-// update Mempool
-const updateMempool = uTxOutList => {
-  const invalidTxs = [];
-
-  for (const tx of mempool) {
+// 지금 pool 이 쓰기로 예약한 outpoint 들
+const spentInPool = pool => {
+  const keys = new Set();
+  for (const tx of pool) {
     for (const txIn of tx.txIns) {
-      if (!hasTxIn(txIn, uTxOutList)) {
-        invalidTxs.push(tx);
-        break;
-      }
+      keys.add(keyOf(txIn.txOutId, txIn.txOutIndex));
     }
   }
+  return keys;
+};
 
-  if (invalidTxs.length > 0) {
-    mempool = _.without(mempool, ...invalidTxs);
-  }
+/*
+ * 같은 UTxO 를 두 번 쓰려는 트랜잭션인지 본다(이중지불).
+ *
+ * 예전에는 mempool 전체를 펼쳐 놓고 txIn 마다 선형으로 훑었다.
+ * mempool 이 상한(500)까지 차면 추가 한 번에 수만 번을 비교하게 된다.
+ */
+const isTxValidForPool = (tx, pool) => {
+  const pending = spentInPool(pool);
+  return tx.txIns.every(
+    txIn => !pending.has(keyOf(txIn.txOutId, txIn.txOutIndex))
+  );
+};
+
+/*
+ * 블록이 붙은 뒤, 더는 유효하지 않은 트랜잭션을 pool 에서 뺀다.
+ *
+ * 예전에는 txIn 마다 UTxOut 배열 전체를 선형으로 훑었다.
+ * mempool 500건 x UTxOut 2만개면 블록 하나마다 천만 번 비교다.
+ * 다른 곳은 색인을 쓰는데 여기만 빠져 있었다.
+ */
+const updateMempool = uTxOutList => {
+  const unspent = indexByOutpoint(uTxOutList);
+
+  mempool = mempool.filter(tx =>
+    tx.txIns.every(txIn => unspent.has(keyOf(txIn.txOutId, txIn.txOutIndex)))
+  );
 };
 
 // Mempool 에 추가하기

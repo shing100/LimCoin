@@ -17,6 +17,7 @@ const { getTxId, getBlockSubsidy } = require("../src/transactions");
 const { getMerkleRoot } = require("../src/merkle");
 const { formatLim } = require("../src/units");
 const HD = require("../src/hdwallet");
+const BIP39 = require("../src/bip39");
 
 const GENESIS_DIFFICULTY = 15;
 
@@ -33,8 +34,10 @@ if (fs.existsSync(walletLocation) && !force) {
   process.exit(1);
 }
 
-// 씨앗 하나에서 필요한 만큼 주소를 파생한다(BIP32). 백업할 것은 씨앗뿐이다.
-const seed = HD.generateSeed();
+// 씨앗 하나에서 필요한 만큼 주소를 파생한다(BIP32).
+// 백업할 것은 니모닉 하나뿐이다(BIP39).
+const mnemonic = BIP39.generateMnemonic();
+const seed = BIP39.mnemonicToSeed(mnemonic);
 const address = HD.getPublicKey(HD.derivePrivateKey(seed, HD.RECEIVE, 0));
 
 // 제네시스 코인베이스는 높이 0 의 보조금을 그대로 받는다(수수료 없음).
@@ -69,7 +72,7 @@ genesisBlock.hash = CryptoJS.SHA256(
 
 fs.writeFileSync(
   walletLocation,
-  JSON.stringify({ version: 1, seed, nextReceive: 1, nextChange: 0, imported: [] }, null, 2) + "\n"
+  JSON.stringify({ version: 2, mnemonic, nextReceive: 1, nextChange: 0, imported: [] }, null, 2) + "\n"
 );
 fs.writeFileSync(genesisLocation, JSON.stringify(genesisBlock, null, 2) + "\n");
 
@@ -78,5 +81,8 @@ console.log("  주소   :", address);
 console.log("  프리마인:", formatLim(genesisTx.txOuts[0].amount), "LIM");
 console.log("  머클루트:", genesisBlock.merkleRoot);
 console.log("  블록해시:", genesisBlock.hash);
-console.log("  지갑   :", walletLocation, "(씨앗이 들어 있다. 커밋 금지)");
+console.log("  지갑   :", walletLocation, "(니모닉이 들어 있다. 커밋 금지)");
+console.log();
+console.log("  복구용 니모닉 — 안전한 곳에 옮겨 적어 두세요:");
+console.log("   ", mnemonic);
 console.log("  제네시스:", genesisLocation, "(커밋 대상)");
