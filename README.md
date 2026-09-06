@@ -10,6 +10,53 @@ yarn dev          # 개발 서버 (nodemon)
 yarn test         # 검증 로직 테스트
 ```
 
+### 환경변수
+
+| | |
+|---|---|
+| `HTTP_PORT` | HTTP 포트 (기본 3000) |
+| `LIMCOIN_DATA_DIR` | 체인 저장 위치 (기본 `data/<포트>`) |
+| `LIMCOIN_WALLET_TOKEN` | 지갑 API 토큰. 지정하지 않으면 뜰 때 만들어 콘솔에 찍는다. `none` 이면 인증을 끈다(로컬 실습용) |
+| `LIMCOIN_MINE` | `1` 이면 뜨자마자 자동 채굴 시작 |
+
+### 공개 API 와 지갑 API
+
+읽기 전용 엔드포인트(`GET /blocks`, `/transactions`, `/peers`, `/address/*`, `/info`)는
+누구나 부를 수 있고 CORS 도 열려 있다. 익스플로러가 붙어야 하기 때문이다.
+
+**지갑을 건드리는 엔드포인트는 토큰을 요구하고 CORS 를 막는다.**
+`/me/*`, `POST /blocks`, `POST /transactions`, `POST /peers`, `POST /mining` 이 여기 해당한다.
+이게 없으면 노드 포트에 닿는 누구나 그 노드의 코인을 빼갈 수 있고,
+아무 웹페이지나 방문자의 로컬 노드에 송금 요청을 보낼 수 있다.
+
+```bash
+curl -H "Authorization: Bearer $LIMCOIN_WALLET_TOKEN" localhost:3000/me/balance
+```
+
+### 체인 저장
+
+블록은 `data/<포트>/blocks.jsonl` 에 한 줄에 하나씩 쌓인다(JSON Lines).
+노드를 재시작하면 이 파일을 읽어 하나씩 다시 검증하며 UTxOut 집합을
+재구성한다. 검증에 실패하는 블록이 나오면 거기까지만 복원하고 나머지는
+P2P 로 다시 받는다.
+
+체인 교체(reorg)는 append 로 표현할 수 없으므로 그때만 파일을 새로 쓴다.
+임시 파일에 쓰고 rename 하므로 도중에 죽어도 반쯤 쓰인 파일이 남지 않는다.
+
+### 자동 채굴
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"enabled":true}' localhost:3000/mining
+```
+
+블록이 꾸준히 나와야 난이도 조절이 의미를 갖는다. 예전에는 `POST /blocks` 를
+사람이 쳐야만 블록이 생겨서, 난이도 조절이 사실상 "사람이 curl 을 치는 속도"를
+재고 있었다.
+
+채굴은 이벤트 루프를 막지 않는다. 일정 해시마다 양보하므로 채굴 중에도
+HTTP 응답과 P2P 메시지가 처리된다.
+
 기본 포트는 3000. `HTTP_PORT` 환경변수로 바꿀 수 있다.
 여러 노드를 띄우려면 각각 다른 포트로 실행한 뒤 `POST /peers` 로 연결한다.
 
@@ -176,18 +223,22 @@ log₂(n) 개의 해시만 있으면 된다.
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
-| GET  | `/blocks` | 전체 블록체인 |
-| POST | `/blocks` | 새 블록 채굴 |
+| GET  | `/blocks` | 블록 목록 (최신순, 기본 50개). `?limit`, `?offset`, 전체 개수는 `X-Total-Count` 헤더 |
+| POST | `/blocks` | 새 블록 채굴 🔒 |
 | GET  | `/blocks/:hash` | 해시로 블록 조회 |
 | GET  | `/peers` | 연결된 피어 목록 |
-| POST | `/peers` | 피어 연결 (`{"peer":"ws://host:port"}`) |
+| POST | `/peers` | 피어 연결 (`{"peer":"ws://host:port"}`) 🔒 |
 | GET  | `/transactions` | mempool |
-| POST | `/transactions` | 송금 (`{"address":"04...","amount":10}`) |
+| POST | `/transactions` | 송금 (`{"address":"04...","amount":600000000,"fee":25000000}`) 🔒 |
 | GET  | `/transactions/:id` | id 로 트랜잭션 조회 |
 | GET  | `/transactions/:id/proof` | 머클(SPV) 증명 |
-| GET  | `/info` | 화폐 정책과 체인 상태 |
-| GET  | `/me/balance` | 내 잔액 |
-| GET  | `/me/address` | 내 주소 |
+| GET  | `/info` | 화폐 정책, 체인 통계(높이/tx수/발행량), 채굴 상태 |
+
+🔒 = 지갑 토큰 필요
+| GET  | `/me/balance` | 내 잔액 🔒 |
+| GET  | `/me/address` | 내 주소 🔒 |
+| GET  | `/mining` | 자동 채굴 상태 |
+| POST | `/mining` | 자동 채굴 켜기/끄기 (`{"enabled":true}`) 🔒 |
 | GET  | `/address/:address` | 특정 주소 잔액 |
 
 
@@ -201,6 +252,15 @@ log₂(n) 개의 해시만 있으면 된다.
 7. createCoinbaseTx
 8. processTxs
 9. validateTx
+
+### store.js
+체인을 `blocks.jsonl` 에 저장하고 읽는다. append-only, reorg 시에만 통째로 다시 쓴다.
+
+### utxo.js
+UTxOut 색인. 아웃포인트(`txOutId:index`) 와 주소 기준. 검증이 선형 스캔이던 것을 없앤다.
+
+### miner.js
+자동 채굴 루프. start / stop / getStatus.
 
 ### units.js
 최소 단위 변환. `parseLim("1.5") === 150000000`, `formatLim(150000000) === "1.5"`
