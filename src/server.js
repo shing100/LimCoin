@@ -15,7 +15,8 @@ const express = require("express"),
 const { getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList, getTxProof, getNewestBlock, initChain } = Blockchain;
 const { getTxFee } = Transactions;
 const { startP2PServer, connectToPeers, getPeers } = P2P;
-const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance } = Wallet;
+const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance, getMnemonic, restoreFromMnemonic, GAP_LIMIT } = Wallet;
+const AddressIndexApi = require("./addressIndex");
 const { getMempool } = Mempool;
 const { isAddressValid, getBlockSubsidy, HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK } = Transactions;
 const { COIN, DECIMALS } = require("./units");
@@ -72,14 +73,31 @@ app.use((req, res, next) => {
   next();
 });
 
+/*
+ * 토큰 비교는 상수 시간으로 한다.
+ *
+ * !== 로 비교하면 앞에서 몇 글자가 맞았는지에 따라 걸리는 시간이 달라져서,
+ * 이론적으로는 한 글자씩 알아낼 수 있다. 로컬 노드 상대로는 네트워크 지연에
+ * 묻히지만, 맞게 하는 데 드는 비용이 없다.
+ *
+ * timingSafeEqual 은 길이가 다르면 던지므로 먼저 해시해 길이를 맞춘다.
+ */
+const tokenMatches = candidate => {
+  const digest = value => crypto.createHash("sha256").update(String(value)).digest();
+  return crypto.timingSafeEqual(digest(candidate), digest(WALLET_TOKEN));
+};
+
 // 지갑을 건드리는 요청은 토큰을 요구한다
 const requireWalletAuth = (req, res, next) => {
   if (AUTH_DISABLED) {
     return next();
   }
   const header = req.get("Authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : req.get("X-Wallet-Token");
-  if (token !== WALLET_TOKEN) {
+  const token = header.startsWith("Bearer ")
+    ? header.slice(7)
+    : req.get("X-Wallet-Token") || "";
+
+  if (!tokenMatches(token)) {
     res.status(401).send("이 엔드포인트는 지갑 토큰이 필요합니다");
     return;
   }
@@ -165,6 +183,46 @@ app.get("/me/addresses", requireWalletAuth, (req, res) => {
 // 받을 주소를 새로 하나 만든다
 app.post("/me/address", requireWalletAuth, (req, res) => {
   res.send({ address: getNewAddress() });
+});
+
+/*
+ * 백업용 니모닉.
+ *
+ * 이 단어들만 있으면 지갑을 통째로 되살릴 수 있다. 곧 이 응답을 보는
+ * 것은 지갑을 보는 것과 같으므로 토큰이 필요하다.
+ */
+app.get("/me/mnemonic", requireWalletAuth, (req, res) => {
+  const mnemonic = getMnemonic();
+  if (mnemonic === null) {
+    res.status(404).send("이 지갑에는 니모닉이 없습니다(예전 형식으로 만들어진 지갑입니다)");
+    return;
+  }
+  res.send({ mnemonic, words: mnemonic.split(" ").length });
+});
+
+/*
+ * 니모닉으로 지갑을 되살린다.
+ *
+ * "어디까지 썼는지"는 니모닉에 들어 있지 않으므로 체인을 훑어 찾는다.
+ * 연속으로 GAP_LIMIT 개가 비어 있으면 거기서 멈춘다.
+ *
+ * 지금 지갑을 덮어쓴다. 되살릴 니모닉이 맞는지 먼저 확인할 것.
+ */
+app.post("/me/restore", requireWalletAuth, (req, res) => {
+  try {
+    const { body: { mnemonic } } = req;
+    if (typeof mnemonic !== "string" || mnemonic.trim() === "") {
+      throw Error('{"mnemonic": "단어 12~24개"} 를 보내세요');
+    }
+    const found = restoreFromMnemonic(mnemonic, AddressIndexApi.hasAddress);
+    res.send({
+      ...found,
+      gapLimit: GAP_LIMIT,
+      balance: getAccountBalance()
+    });
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
 });
 
 app.get("/blocks/:hash", (req, res) => {

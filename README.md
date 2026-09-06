@@ -57,8 +57,11 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 사람이 쳐야만 블록이 생겨서, 난이도 조절이 사실상 "사람이 curl 을 치는 속도"를
 재고 있었다.
 
-채굴은 이벤트 루프를 막지 않는다. 일정 해시마다 양보하므로 채굴 중에도
-HTTP 응답과 P2P 메시지가 처리된다.
+채굴은 **워커 스레드**에서 돈다(`src/pow-worker.js`). 메인 스레드는 아예
+손대지 않으므로 채굴 중에도 HTTP 응답이 밀리지 않는다 — 채굴 중 `GET /info`
+평균 1.4ms 를 확인했다.
+
+다른 노드가 먼저 블록을 올리면 워커에 중단 신호를 보내 헛돌지 않게 한다.
 
 기본 포트는 3000. `HTTP_PORT` 환경변수로 바꿀 수 있다.
 여러 노드를 띄우려면 각각 다른 포트로 실행한 뒤 `POST /peers` 로 연결한다.
@@ -161,7 +164,19 @@ curl -X POST localhost:3000/transactions -H 'Content-Type: application/json' \
 것이 된다.
 
 구현은 BIP32 공식 테스트 벡터로 검증한다(`test/hdwallet.test.js`).
-BIP39 니모닉은 2048단어 목록이 필요해 다루지 않는다 — 씨앗을 16진수로 쓴다.
+
+씨앗은 **BIP39 니모닉 24단어**로 보관한다. 64자짜리 16진수는 사람이 옮겨
+적기 어렵고 한 글자만 틀려도 지갑을 잃는다. 니모닉에는 체크섬이 있어
+잘못 적으면 대개 걸리고, 단어 목록은 앞 네 글자만으로 서로 구별된다.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" localhost:3000/me/mnemonic
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"mnemonic":"단어 24개"}' localhost:3000/me/restore
+```
+
+복구할 때 "어디까지 썼는지"는 니모닉에 들어 있지 않으므로 체인을 훑어
+찾는다. 연속으로 20개(BIP44 의 gap limit)가 비어 있으면 거기서 멈춘다.
 
 **8장 Simplified Payment Verification — 머클 증명**
 
@@ -272,6 +287,8 @@ log₂(n) 개의 해시만 있으면 된다.
 | GET  | `/me/address` | 지금 받는 주소 🔒 |
 | POST | `/me/address` | 받는 주소를 새로 만든다 🔒 |
 | GET  | `/me/addresses` | 지갑의 모든 주소와 잔액 🔒 |
+| GET  | `/me/mnemonic` | 백업용 니모닉 🔒 |
+| POST | `/me/restore` | 니모닉으로 지갑 복구 🔒 |
 | GET  | `/mining` | 자동 채굴 상태 |
 | POST | `/mining` | 자동 채굴 켜기/끄기 (`{"enabled":true}`) 🔒 |
 | GET  | `/address/:address` | 특정 주소 잔액 |
@@ -289,6 +306,13 @@ log₂(n) 개의 해시만 있으면 된다.
 7. createCoinbaseTx
 8. processTxs
 9. validateTx
+
+### bip39.js
+니모닉 <-> 엔트로피 <-> 씨앗. 공식 테스트 벡터로 검증한다.
+단어 목록은 `bip39-wordlist.js`.
+
+### pow.js / pow-worker.js
+작업증명. 해시 계산은 메인 스레드와 워커가 함께 쓰므로 따로 두었다.
 
 ### hdwallet.js
 BIP32 방식 키 파생. `masterFromSeed`, `deriveChild`, `derivePrivateKey`.

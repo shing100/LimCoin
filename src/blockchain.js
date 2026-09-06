@@ -1,12 +1,16 @@
-const CryptoJS = require("crypto-js"),
-  _ = require("lodash"),
+const _ = require("lodash"),
   Wallet = require("./wallet"),
   Mempool = require("./memPool"),
   Transactions = require("./transactions"),
   Merkle = require("./merkle"),
   Store = require("./store"),
   AddressIndex = require("./addressIndex"),
-  hexToBinary = require("hex-to-binary");
+  PoW = require("./pow"),
+  { Worker } = require("worker_threads"),
+  path = require("path");
+
+// 해시 계산은 워커와 함께 쓰므로 pow.js 에 따로 두었다
+const { createHash } = PoW;
 
 const { getMerkleRoot, getMerkleProof } = Merkle;
 
@@ -77,26 +81,21 @@ const getTimestamp = () => Math.round(new Date().getTime() / 1000);
 // 블록체인 전체 가져오기
 const getBlockChain = () => blockchain;
 
-// 헤더 해시. 본문(data)이 아니라 머클 루트만 들어간다.
-const createHash = (index, previousHash, timestamp, merkleRoot, difficulty, nonce) =>
-  CryptoJS.SHA256(
-    index+previousHash+timestamp+merkleRoot+difficulty+nonce
-  ).toString();
-
 // 코인 기반 새로운 블록 생성하기
 const createNewBlock = async () => {
   const nextIndex = getNewestBlock().index + 1;
-  const uTxOuts = getUTxOutList();
+  // 모듈 스코프의 uTxOuts 를 가리지 않게 이름을 달리한다
+  const snapshot = getUTxOutList();
 
   // mempool 전체를 그대로 담던 것을 한도 안에서 수수료율 높은 순으로 고른다.
   // 코인베이스 자리 하나를 빼고 담는다.
   const selected = selectTxsForBlock(
     getMempool(),
-    uTxOuts,
+    snapshot,
     MAX_TXS_PER_BLOCK - 1
   );
   const totalFees = selected.reduce(
-    (sum, tx) => sum + getTxFee(tx, uTxOuts),
+    (sum, tx) => sum + getTxFee(tx, snapshot),
     0
   );
 
@@ -112,14 +111,29 @@ const createNewRawBlock = async data => {
   const newBlockIndex = previousBlock.index + 1;
   const newTimestamp = getTimestamp();
   const difficulty = findDifficulty();
-  const newBlock = await findBlockAsync(
+  const mining = findBlockInWorker(
     newBlockIndex,
     previousBlock.hash,
     newTimestamp,
     data,
     difficulty
   );
-  // 채굴하는 사이에 다른 노드가 먼저 블록을 올렸을 수 있다
+
+  // 다른 노드가 먼저 블록을 올리면 헛돌지 않고 멈춘다
+  const cancelIfStale = setInterval(() => {
+    if (getNewestBlock().hash !== previousBlock.hash) {
+      mining.cancel();
+    }
+  }, 500);
+
+  let newBlock;
+  try {
+    newBlock = await mining;
+  } finally {
+    clearInterval(cancelIfStale);
+  }
+
+  // 취소가 늦었을 수도 있으니 한 번 더 본다
   if (newBlock.previousHash !== getNewestBlock().hash) {
     throw Error("채굴하는 동안 다른 블록이 먼저 들어왔습니다. 다시 시도하세요.");
   }
@@ -154,61 +168,57 @@ const calculateNewDifficulty = (newestBlock, blockchain) => {
   }
 }
 
-// nonce를 이용하여 원하는 블록 찾기
-const findBlock = (index, previousHash, timestamp, data, difficulty) => {
-    // 본문은 채굴 중에 바뀌지 않으므로 머클 루트는 한 번만 구하면 된다.
-    // 예전에는 nonce 를 돌릴 때마다 트랜잭션 전체를 JSON 으로 직렬화했다.
-    const merkleRoot = getMerkleRoot(data);
-    let nonce = 0;
-    while(true){
-      const hash = createHash(
-        index,
-        previousHash,
-        timestamp,
-        merkleRoot,
-        difficulty,
-        nonce
-      );
-      if(hashMatchesDifficulty(hash, difficulty)){
-        return new Block(index, hash, previousHash, timestamp, merkleRoot, data, difficulty, nonce);
-      }
-      nonce++
-    }
-};
-
 /*
- * 위 findBlock 은 동기 while 루프라 도는 동안 HTTP 응답도 P2P 소켓도
- * 전부 멈춘다. 난이도 15 는 평균 3만 해시라 1초 남짓이지만, 20 이면
- * 100만 해시다.
+ * nonce 찾기를 워커 스레드에 맡긴다.
  *
- * 같은 일을 하되 일정 횟수마다 이벤트 루프에 양보한다. 진짜 채굴이라면
- * worker_threads 로 빼야 하지만, 그러면 코어가 워커 진입점을 따로 갖게
- * 되어 배우기에는 오히려 흐려진다.
+ * 예전에는 메인 스레드에서 돌리되 일정 해시마다 이벤트 루프에 양보했다.
+ * 그러면 HTTP 응답이 막히지는 않지만 채굴과 서버가 한 코어를 나눠 쓴다.
+ * 워커로 빼면 채굴이 다른 코어에서 돌고 메인 스레드는 손대지 않는다.
+ *
+ * 반환된 promise 에 cancel() 이 붙어 있다 — 다른 노드가 먼저 블록을
+ * 올렸을 때 헛돌지 않고 멈추기 위한 것이다.
  */
-const HASHES_PER_TICK = 20000;
+const WORKER_PATH = path.join(__dirname, "pow-worker.js");
 
-const findBlockAsync = async (index, previousHash, timestamp, data, difficulty) => {
+const findBlockInWorker = (index, previousHash, timestamp, data, difficulty) => {
   const merkleRoot = getMerkleRoot(data);
-  let nonce = 0;
-  while (true) {
-    for (let i = 0; i < HASHES_PER_TICK; i++) {
-      const hash = createHash(index, previousHash, timestamp, merkleRoot, difficulty, nonce);
-      if (hashMatchesDifficulty(hash, difficulty)) {
-        return new Block(index, hash, previousHash, timestamp, merkleRoot, data, difficulty, nonce);
+  const header = { index, previousHash, timestamp, merkleRoot, difficulty };
+
+  let worker;
+  const promise = new Promise((resolve, reject) => {
+    worker = new Worker(WORKER_PATH, { workerData: header });
+
+    worker.on("message", message => {
+      if (message.type === "found") {
+        resolve(
+          new Block(
+            index, message.hash, previousHash, timestamp,
+            merkleRoot, data, difficulty, message.nonce
+          )
+        );
+      } else {
+        reject(Error("채굴이 취소되었습니다"));
       }
-      nonce++;
-    }
-    // 여기서 다른 요청과 소켓 메시지가 처리된다
-    await new Promise(resolve => setImmediate(resolve));
-  }
+      worker.terminate();
+    });
+
+    worker.on("error", error => {
+      worker.terminate();
+      reject(error);
+    });
+    worker.on("exit", code => {
+      // 정상 종료(terminate)는 코드 1 로 끝난다. 이미 resolve/reject 된
+      // promise 에 다시 부르는 것은 무시되므로 그대로 둔다.
+      if (code !== 0 && code !== 1) {
+        reject(Error(`채굴 워커가 코드 ${code} 로 종료되었습니다`));
+      }
+    });
+  });
+
+  promise.cancel = () => worker.postMessage("stop");
+  return promise;
 };
-// 난이도 0 찾기 조정
-const hashMatchesDifficulty = (hash, difficulty = 15) => {
-  const hashInBinary = hexToBinary(hash);
-  const requiredZeros = "0".repeat(difficulty);
-  //console.log('Trying difficulty:',difficulty,'with hash', hash);
-  return hashInBinary.startsWith(requiredZeros);
-}
+
 // 타임스탬프 유효성 검사
 const isTimeStampValid = (newBlock, oldBlock) => {
   return (oldBlock.timestamp - TIMESTAMP_MINIT < newBlock.timestamp && newBlock.timestamp - TIMESTAMP_MINIT < getTimestamp())
@@ -262,9 +272,15 @@ const isChainValid = (candidateChain) => {
       console.log('The candidate chain is empty');
       return null;
     }
-    const isGenesisValid = block => {
-      return JSON.stringify(block) === JSON.stringify(genesisBlock);
-    };
+    /*
+     * JSON.stringify 로 비교하면 키 순서가 곧 합의 규칙이 된다.
+     * 해시는 index, previousHash, timestamp, merkleRoot, difficulty, nonce 를
+     * 모두 덮고, merkleRoot 가 트랜잭션 id 를, 트랜잭션 id 가 그 내용을
+     * 덮으므로 해시 + 머클 루트 대조로 충분하다.
+     */
+    const isGenesisValid = block =>
+      block.hash === genesisBlock.hash &&
+      getMerkleRoot(block.data) === genesisBlock.merkleRoot;
     if(!isGenesisValid(candidateChain[0])){
       console.log('The candidateChains genesisBlock is not the same as our genesisBlock');
       return null;
@@ -344,10 +360,13 @@ const collectOrphanedTxs = (oldChain, newChain) => {
 // 밀려난 트랜잭션을 mempool 로 되돌린다.
 // 새 체인 기준으로 더는 유효하지 않은 것은 조용히 버린다.
 const reinstateTxs = txs => {
+  // getUTxOutList() 는 deep clone 이다. mempool 에 넣는다고 UTxOut 집합이
+  // 바뀌지는 않으므로 한 번만 뜬다. 예전에는 트랜잭션마다 복제했다.
+  const snapshot = getUTxOutList();
   let restored = 0;
   for (const tx of txs) {
     try {
-      addToMempool(tx, getUTxOutList());
+      addToMempool(tx, snapshot);
       restored++;
     } catch (e) {
       // 이미 다른 트랜잭션이 같은 UTxO 를 썼거나 유효하지 않게 된 경우
@@ -422,7 +441,10 @@ const initChain = (dataDir) => {
     return { restored: 0, height: 0 };
   }
 
-  if (persisted[0].hash !== genesisBlock.hash) {
+  if (
+    persisted[0].hash !== genesisBlock.hash ||
+    getMerkleRoot(persisted[0].data) !== genesisBlock.merkleRoot
+  ) {
     // genesis.json 을 새로 만들었는데 옛 체인이 남아 있는 경우
     console.log(
       "저장된 체인의 제네시스가 지금 genesis.json 과 다릅니다. 저장본을 버리고 새로 시작합니다."
@@ -476,14 +498,29 @@ const getAccountBalance = () => getWalletBalance(uTxOuts);
 
 // 보내는 트렌젝션
 const sendTx = (address, amount, fee = 0) => {
-  const tx = createTx(address, amount, getUTxOutList(), getMempool(), fee);
-  addToMempool(tx, getUTxOutList());
+  const snapshot = getUTxOutList();
+  const tx = createTx(address, amount, snapshot, getMempool(), fee);
+  addToMempool(tx, snapshot);
   require("./p2p").broadcastMempool();
   return tx;
 };
 
-const handleIncomingTx = (tx) => {
-  addToMempool(tx, getUTxOutList());
+/*
+ * 피어에게 받은 트랜잭션을 mempool 에 넣는다.
+ *
+ * 낱개로 부르지 않고 묶어서 받는다 — getUTxOutList() 가 deep clone 이라
+ * 트랜잭션마다 부르면 피어가 보낸 mempool 크기만큼 복제가 일어난다.
+ * 유효하지 않은 것은 건너뛴다(이미 쓰인 UTxO 를 가리키는 등).
+ */
+const handleIncomingTxs = txs => {
+  const snapshot = getUTxOutList();
+  for (const tx of txs) {
+    try {
+      addToMempool(tx, snapshot);
+    } catch (e) {
+      console.log(`피어가 보낸 트랜잭션을 받지 못했습니다: ${e.message}`);
+    }
+  }
 };
 
 module.exports = {
@@ -499,6 +536,6 @@ module.exports = {
   createNewBlock,
   getAccountBalance,
   sendTx,
-  handleIncomingTx,
+  handleIncomingTxs,
   getUTxOutList
 };

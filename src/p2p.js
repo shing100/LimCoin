@@ -2,7 +2,7 @@ const WebSockets = require('ws'),
   Blockchain = require('./blockchain'),
   Mempool = require("./memPool");
 
-const { getNewestBlock, isBlockStructureValid, replaceChain, getBlockChain, addBlockToChain, handleIncomingTx } = Blockchain;
+const { getNewestBlock, isBlockStructureValid, replaceChain, getBlockChain, addBlockToChain, handleIncomingTxs } = Blockchain;
 
 const { getMempool } = Mempool;
 const sockets = [];
@@ -138,13 +138,8 @@ const handleSocketMessages = ws => {
         if(!(receivedTxs instanceof Array)){
           return;
         }
-        receivedTxs.forEach(tx => {
-          try{
-            handleIncomingTx(tx);
-          }catch(e){
-            console.log(e);
-          }
-        })
+        // 낱개로 넣으면 트랜잭션마다 UTxOut 집합을 복제하게 된다
+        handleIncomingTxs(receivedTxs);
         break;
     }
   });

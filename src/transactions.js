@@ -391,7 +391,14 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
     return false;
   }
 
-  // 일반 트랜잭션을 먼저 검증해야 코인베이스가 가져갈 수수료 합을 알 수 있다
+  /*
+   * 일반 트랜잭션을 먼저 검증해야 코인베이스가 가져갈 수수료 합을 알 수 있다.
+   *
+   * 색인은 이 블록을 적용하기 *전*의 UTxOut 으로 만든다. 곧 같은 블록 안에서
+   * 앞선 트랜잭션이 만든 출력을 뒤 트랜잭션이 쓰는 것(in-block chaining)은
+   * 허용되지 않는다. 어차피 addToMempool 이 확정된 UTxOut 만 보고 검증하므로
+   * 그런 트랜잭션은 mempool 에 들어오지도 못한다.
+   */
   const nonCoinbaseTxs = txs.slice(1);
   const uTxOuts = indexByOutpoint(uTxOutList);
   let totalFees = 0;

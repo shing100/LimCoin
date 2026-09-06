@@ -16,7 +16,8 @@
 const path = require("path"),
   fs = require("fs"),
   Transactions = require("./transactions"),
-  HD = require("./hdwallet");
+  HD = require("./hdwallet"),
+  BIP39 = require("./bip39");
 
 const { keyOf, outpointKey } = require("./utxo");
 
@@ -29,24 +30,38 @@ const {
   TxOut
 } = Transactions;
 
-const WALLET_VERSION = 1;
+const WALLET_VERSION = 2;
+
+/*
+ * 니모닉으로 지갑을 되살릴 때 "어디까지 썼는지"는 저장돼 있지 않다.
+ * 체인을 보고 찾아야 하는데, 중간에 안 쓴 주소가 몇 개 있을 수 있으므로
+ * 연속으로 이만큼 비어 있으면 거기서 멈춘다 (BIP44 의 gap limit).
+ */
+const GAP_LIMIT = 20;
+const MAX_SCAN = 1000;
 
 const walletLocation = () => path.join(__dirname, "wallet.json");
 // 예전 지갑이 쓰던 파일. 있으면 그 키를 가져온다.
 const legacyKeyLocation = () => path.join(__dirname, "privateKey");
 
+// 지갑 파일과, 니모닉에서 뽑아 둔 씨앗을 함께 들고 있는다.
+// 씨앗 파생은 PBKDF2 2048회라 매번 하면 아깝다.
 let cache = null;
+
+const seedOf = wallet =>
+  wallet.mnemonic ? BIP39.mnemonicToSeed(wallet.mnemonic) : wallet.seed;
 
 const readWallet = () => {
   if (cache !== null) {
     return cache;
   }
-  cache = JSON.parse(fs.readFileSync(walletLocation(), "utf8"));
+  const wallet = JSON.parse(fs.readFileSync(walletLocation(), "utf8"));
+  cache = { wallet, seed: seedOf(wallet) };
   return cache;
 };
 
 const writeWallet = wallet => {
-  cache = wallet;
+  cache = { wallet, seed: seedOf(wallet) };
   fs.writeFileSync(walletLocation(), JSON.stringify(wallet, null, 2) + "\n");
 };
 
@@ -74,7 +89,9 @@ const initWallet = () => {
 
   writeWallet({
     version: WALLET_VERSION,
-    seed: HD.generateSeed(),
+    // 씨앗을 16진수로 두는 대신 니모닉으로 둔다. 사람이 옮겨 적을 수 있고
+    // 체크섬이 있어 잘못 적으면 대개 걸린다.
+    mnemonic: BIP39.generateMnemonic(),
     // 받는 주소는 바로 쓸 수 있게 하나 미리 만들어 둔다.
     // 거스름돈 주소는 실제로 송금할 때 만든다.
     nextReceive: 1,
@@ -83,29 +100,32 @@ const initWallet = () => {
   });
 };
 
+// 백업용 니모닉. v1 지갑(16진수 씨앗)에는 없다.
+const getMnemonic = () => readWallet().wallet.mnemonic || null;
+
 const getSeed = () => readWallet().seed;
 
-const deriveAt = (wallet, branch, index) =>
-  HD.derivePrivateKey(wallet.seed, branch, index);
+const getWallet = () => readWallet().wallet;
+
+const deriveAt = (branch, index) =>
+  HD.derivePrivateKey(getSeed(), branch, index);
 
 /**
  * 지갑이 가진 모든 키. 받는 주소 + 거스름돈 주소 + 예전 형식에서 가져온 것.
  */
 const getAllKeys = () => {
-  const wallet = readWallet();
+  const { wallet, seed } = readWallet();
   const keys = [];
 
-  const push = (branch, index, kind) => {
-    const privateKey = deriveAt(wallet, branch, index);
-    keys.push({ kind, index, privateKey, address: getPublicKey(privateKey) });
+  const pushRange = (branch, count, kind) => {
+    HD.deriveRange(seed, branch, 0, count).forEach((privateKey, index) => {
+      keys.push({ kind, index, privateKey, address: getPublicKey(privateKey) });
+    });
   };
 
-  for (let i = 0; i < wallet.nextReceive; i++) {
-    push(HD.RECEIVE, i, "receive");
-  }
-  for (let i = 0; i < wallet.nextChange; i++) {
-    push(HD.CHANGE, i, "change");
-  }
+  pushRange(HD.RECEIVE, wallet.nextReceive, "receive");
+  pushRange(HD.CHANGE, wallet.nextChange, "change");
+
   for (const privateKey of wallet.imported) {
     keys.push({
       kind: "imported",
@@ -121,14 +141,14 @@ const getAddresses = () => getAllKeys().map(key => key.address);
 
 // 지금 받는 데 쓰는 주소 (가장 최근에 만든 받는 주소)
 const getReceiveAddress = () => {
-  const wallet = readWallet();
-  return getPublicKey(deriveAt(wallet, HD.RECEIVE, wallet.nextReceive - 1));
+  const { wallet } = readWallet();
+  return getPublicKey(deriveAt(HD.RECEIVE, wallet.nextReceive - 1));
 };
 
 // 받는 주소를 하나 더 만든다
 const getNewAddress = () => {
-  const wallet = readWallet();
-  const address = getPublicKey(deriveAt(wallet, HD.RECEIVE, wallet.nextReceive));
+  const { wallet } = readWallet();
+  const address = getPublicKey(deriveAt(HD.RECEIVE, wallet.nextReceive));
   writeWallet({ ...wallet, nextReceive: wallet.nextReceive + 1 });
   return address;
 };
@@ -138,10 +158,73 @@ const getNewAddress = () => {
  * 주소로 거스름돈이 돌아와, 주소를 새로 만드는 의미가 없어진다.
  */
 const getChangeAddress = () => {
-  const wallet = readWallet();
-  const address = getPublicKey(deriveAt(wallet, HD.CHANGE, wallet.nextChange));
+  const { wallet } = readWallet();
+  const address = getPublicKey(deriveAt(HD.CHANGE, wallet.nextChange));
   writeWallet({ ...wallet, nextChange: wallet.nextChange + 1 });
   return address;
+};
+
+/**
+ * 니모닉으로 지갑을 되살린다.
+ *
+ * "어디까지 썼는지"는 지갑 파일에만 있고 니모닉에는 없다. 그래서 체인을
+ * 보고 찾아야 한다. isUsed 는 그 주소가 체인에 나타난 적 있는지 알려 주는
+ * 함수다(노드의 주소 색인).
+ *
+ * 중간에 안 쓴 주소가 있을 수 있으므로 연속으로 GAP_LIMIT 개가 비어 있을
+ * 때까지 훑는다.
+ *
+ * 기존 지갑을 덮어쓴다. 되살릴 니모닉이 맞는지 먼저 확인할 것.
+ */
+const restoreFromMnemonic = (mnemonic, isUsed) => {
+  if (!BIP39.validateMnemonic(mnemonic)) {
+    throw Error("니모닉이 올바르지 않습니다. 단어와 순서를 확인하세요.");
+  }
+  const seed = BIP39.mnemonicToSeed(mnemonic);
+
+  /*
+   * "연속으로" GAP_LIMIT 개가 비어 있을 때까지 훑는다.
+   *
+   * 처음에는 GAP_LIMIT 개씩 묶어 보고 그 묶음이 통째로 비면 멈추게 했는데,
+   * 그러면 어디까지 찾느냐가 묶음 경계에 따라 달라진다. 0..4 와 25 를 쓴
+   * 지갑에서 5..24 가 이미 20개 연속으로 비었는데도 25 를 찾아 버렸다.
+   * 연속 개수를 직접 세야 한다.
+   */
+  const scan = branch => {
+    let used = 0;
+    let consecutiveUnused = 0;
+    let index = 0;
+
+    while (consecutiveUnused < GAP_LIMIT && index < MAX_SCAN) {
+      // 파생은 묶어서 한다. 마스터/갈래 파생을 매번 다시 하지 않으려는 것뿐이고
+      // 멈추는 시점과는 무관하다.
+      const batch = HD.deriveRange(seed, branch, index, GAP_LIMIT);
+      for (const privateKey of batch) {
+        if (isUsed(getPublicKey(privateKey))) {
+          used = index + 1;
+          consecutiveUnused = 0;
+        } else {
+          consecutiveUnused++;
+        }
+        index++;
+        if (consecutiveUnused >= GAP_LIMIT) {
+          break;
+        }
+      }
+    }
+    return used;
+  };
+
+  const wallet = {
+    version: WALLET_VERSION,
+    mnemonic: BIP39.mnemonicToEntropy(mnemonic) && mnemonic.normalize("NFKD").trim().split(/\s+/).join(" "),
+    // 받는 주소는 최소 하나 있어야 쓸 수 있다
+    nextReceive: Math.max(1, scan(HD.RECEIVE)),
+    nextChange: scan(HD.CHANGE),
+    imported: []
+  };
+  writeWallet(wallet);
+  return { receive: wallet.nextReceive, change: wallet.nextChange };
 };
 
 // 예전 API 이름. 코인베이스 수취 주소로 쓰인다.
@@ -244,6 +327,10 @@ const createTx = (receiverAddress, amount, uTxOutList, memPool, fee = 0) => {
 module.exports = {
   initWallet,
   getSeed,
+  getWallet,
+  getMnemonic,
+  restoreFromMnemonic,
+  GAP_LIMIT,
   getAllKeys,
   getAddresses,
   getReceiveAddress,
