@@ -109,16 +109,26 @@ const selectTxsForBlock = (candidates, uTxOutList, limit) => {
 
   // 부모가 만든 출력을 자식이 쓰는 경우가 있으므로, 수수료율만 보고 자를 수
   // 없다. 부모 없이 자식만 담기면 그 블록은 검증에서 떨어진다.
-  const confirmed = indexByOutpoint(uTxOutList);
   const producedBy = new Map(); // outpoint -> 그것을 만든 tx
+
+  /*
+   * 수수료를 구하려면 입력이 가리키는 출력을 되짚어야 한다. 확정된 것만
+   * 보면 부모가 mempool 에 있는 자식은 입력이 "없는 출력"이 되어 수수료가
+   * 크게 음수로 나오고, 줄 세우기가 뒤집힌다. 후보들이 만든 출력도 함께
+   * 넣어 둔다.
+   */
+  const sources = indexByOutpoint(uTxOutList);
   for (const tx of candidates) {
-    tx.txOuts.forEach((txOut, index) => producedBy.set(keyOf(tx.id, index), tx));
+    tx.txOuts.forEach((txOut, index) => {
+      producedBy.set(keyOf(tx.id, index), tx);
+      sources.set(keyOf(tx.id, index), txOut);
+    });
   }
 
   const byFeeRate = candidates
     .map(tx => ({
       tx,
-      feeRate: getTxFee(tx, confirmed) / Math.max(1, tx.txIns.length)
+      feeRate: getTxFee(tx, sources) / Math.max(1, tx.txIns.length)
     }))
     .sort((a, b) => b.feeRate - a.feeRate)
     .map(entry => entry.tx);

@@ -13,7 +13,7 @@ const express = require("express"),
     crypto = require("crypto");
 
 const {
-  getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList,
+  getBlockChain, createNewBlock, getAccountBalance, getSpendableBalance, sendTx, getUTxOutList,
   getTxProof, getNewestBlock, initChain, getBlockByHash, findTx
 } = Blockchain;
 const { getTxFee } = Transactions;
@@ -162,9 +162,19 @@ app.route("/peers")
     }
   });
 
+/*
+ * 잔액.
+ *
+ * balance 는 블록에 담긴 것만 센 확정 잔액이고, spendable 은 mempool 까지
+ * 반영해 지금 실제로 보낼 수 있는 금액이다. 보내고 나면 그 코인은 아직
+ * 블록에 없지만 이미 남에게 간 것이라, 확정 잔액만 보여 주면 없는 돈이
+ * 있는 것처럼 보인다.
+ */
 app.get("/me/balance", requireWalletAuth, (req, res) => {
-  const balance = getAccountBalance();
-  res.send({ balance });
+  res.send({
+    balance: getAccountBalance(),
+    spendable: getSpendableBalance()
+  });
 });
 
 app.get("/me/address", requireWalletAuth, (req,res) => {
@@ -187,6 +197,68 @@ app.get("/me/addresses", requireWalletAuth, (req, res) => {
       balance: balances.get(address) || 0
     }))
   );
+});
+
+/*
+ * 아직 블록에 담기지 않은, 내 지갑이 얽힌 트랜잭션.
+ *
+ * 지갑은 지금까지 확정된 내역만 볼 수 있었다. 보내고 나면 블록이 나올
+ * 때까지 아무 흔적도 없어서, 보내진 건지 알 수 없었다.
+ *
+ * "얼마를 썼는가"는 입력이 가리키는 이전 출력을 되짚어야 알 수 있고
+ * 그건 UTxOut 집합을 가진 노드만 할 수 있다. 주소 색인이 블록에 대해
+ * 하는 일을 mempool 에 대해 하는 셈이라, 응답 모양도 색인과 맞춘다.
+ */
+app.get("/me/pending", requireWalletAuth, (req, res) => {
+  const mine = new Set(getAddresses());
+  const mempool = getMempool();
+
+  // 확정된 출력에 더해 mempool 이 만든 출력도 되짚을 수 있어야 한다
+  // (확인을 기다리지 않고 연달아 보낸 경우)
+  const sources = indexByOutpoint(getUTxOutList());
+  for (const tx of mempool) {
+    tx.txOuts.forEach((txOut, index) => {
+      sources.set(`${tx.id}:${index}`, txOut);
+    });
+  }
+
+  const entries = [];
+  for (const tx of mempool) {
+    let received = 0;
+    let spent = 0;
+    let inputTotal = 0;
+
+    for (const txIn of tx.txIns) {
+      const source = sources.get(`${txIn.txOutId}:${txIn.txOutIndex}`);
+      if (source === undefined) {
+        continue;
+      }
+      inputTotal += source.amount;
+      if (mine.has(source.address)) {
+        spent += source.amount;
+      }
+    }
+    const outputTotal = tx.txOuts.reduce((sum, txOut) => sum + txOut.amount, 0);
+    for (const txOut of tx.txOuts) {
+      if (mine.has(txOut.address)) {
+        received += txOut.amount;
+      }
+    }
+
+    if (received > 0 || spent > 0) {
+      entries.push({
+        txId: tx.id,
+        blockIndex: null,
+        timestamp: null,
+        coinbase: false,
+        outputTotal,
+        received,
+        spent,
+        fee: Math.max(0, inputTotal - outputTotal)
+      });
+    }
+  }
+  res.send(entries);
 });
 
 // 받을 주소를 새로 하나 만든다

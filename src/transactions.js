@@ -402,6 +402,27 @@ const applyTxToIndex = (tx, uTxOuts) => {
   });
 };
 
+/*
+ * 블록에 담을 트랜잭션들의 수수료 합.
+ *
+ * 반드시 담기는 순서대로 훑으며 색인을 갱신해야 한다. 같은 블록 안에서
+ * 앞선 트랜잭션이 만든 출력을 뒤 트랜잭션이 쓸 수 있기 때문이다
+ * (in-block chaining). 블록 이전의 UTxOut 만 보고 계산하면 그런 입력이
+ * "없는 출력"이 되어 수수료가 음수로 나오고, 코인베이스가 보조금보다
+ * 적게 가져가는 블록을 만들어 스스로 거부하게 된다.
+ *
+ * validateBlockTxs 가 검증하면서 세는 방식과 같아야 한다.
+ */
+const sumBlockFees = (txs, uTxOutList) => {
+  const uTxOuts = indexByOutpoint(uTxOutList);
+  let total = 0;
+  for (const tx of txs) {
+    total += getTxFee(tx, uTxOuts);
+    applyTxToIndex(tx, uTxOuts);
+  }
+  return total;
+};
+
 const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
   if (!(txs instanceof Array) || txs.length === 0) {
     console.log("A block must contain at least a coinbase tx");
@@ -532,6 +553,7 @@ module.exports = {
   getBlockSubsidy,
   getTotalSupply,
   getTxFee,
+  sumBlockFees,
   HALVING_INTERVAL,
   INITIAL_SUBSIDY,
   MAX_TXS_PER_BLOCK,

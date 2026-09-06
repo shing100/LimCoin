@@ -23,11 +23,13 @@ const {
   updateUTxOuts,
   collectConsumed,
   rollbackTxs,
-  getTxFee,
+  sumBlockFees,
   MAX_TXS_PER_BLOCK
 } = Transactions;
 
-const { addToMempool, getMempool, updateMempool, selectTxsForBlock } = Mempool;
+const {
+  addToMempool, getMempool, updateMempool, selectTxsForBlock, getSpendableUTxOuts
+} = Mempool;
 const { indexByOutpoint } = require("./utxo");
 
 const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기
@@ -112,12 +114,12 @@ const createNewBlock = async () => {
     snapshot,
     MAX_TXS_PER_BLOCK - 1
   );
-  // getTxFee 는 배열을 받으면 입력마다 훑는다. 색인을 한 번만 만든다.
-  const unspent = indexByOutpoint(snapshot);
-  const totalFees = selected.reduce(
-    (sum, tx) => sum + getTxFee(tx, unspent),
-    0
-  );
+  /*
+   * 수수료는 담기는 순서대로 세어야 한다. 앞선 트랜잭션이 만든 출력을
+   * 뒤 트랜잭션이 쓰는 경우(chained send), 블록 이전의 UTxOut 만 보면
+   * 그 입력이 "없는 출력"이 되어 수수료가 음수로 나온다.
+   */
+  const totalFees = sumBlockFees(selected, snapshot);
 
   // 채굴자는 보조금에 더해 담은 트랜잭션들의 수수료를 가져간다 (백서 6장)
   const coinbaseTx = createCoinbaseTx(getPublicFromWallet(), nextIndex, totalFees);
@@ -762,14 +764,34 @@ const getUTxOutList = () => uTxOuts.slice();
 // 지갑 정보 가져오기
 const getAccountBalance = () => getWalletBalance(uTxOuts);
 
-// 보내는 트렌젝션
+/*
+ * 보내는 트랜잭션.
+ *
+ * 쓸 수 있는 것은 확정된 UTxOut 에 mempool 이 만든 출력을 더하고 mempool 이
+ * 이미 쓴 것을 뺀 집합이다. 예전에는 확정된 것만 보고 골랐다. 그러면
+ * 방금 보내고 남은 거스름돈이 블록에 담길 때까지 묶여서, 잔액이 남아
+ * 있는데도 "Not enough funds" 가 났다 — 노드는 그런 트랜잭션(chained
+ * send)을 받아 주는데 지갑이 만들지를 못했다.
+ *
+ * 확인 절차에는 확정된 집합을 그대로 넘긴다. addToMempool 이 안에서
+ * 같은 계산을 하므로 두 번 더하면 안 된다.
+ */
 const sendTx = (address, amount, fee = 0) => {
-  const snapshot = getUTxOutList();
-  const tx = createTx(address, amount, snapshot, getMempool(), fee);
-  addToMempool(tx, snapshot);
+  const confirmed = getUTxOutList();
+  const tx = createTx(
+    address,
+    amount,
+    getSpendableUTxOuts(confirmed),
+    getMempool(),
+    fee
+  );
+  addToMempool(tx, confirmed);
   require("./p2p").broadcastMempool();
   return tx;
 };
+
+// 확정 잔액과, mempool 까지 반영한 실제로 쓸 수 있는 잔액
+const getSpendableBalance = () => getWalletBalance(getSpendableUTxOuts(uTxOuts));
 
 /*
  * 피어에게 받은 트랜잭션을 mempool 에 넣는다.
@@ -808,6 +830,7 @@ module.exports = {
   getBlockChain,
   createNewBlock,
   getAccountBalance,
+  getSpendableBalance,
   sendTx,
   handleIncomingTxs,
   getUTxOutList
