@@ -9,16 +9,23 @@ const express = require("express"),
     Transactions = require("./transactions"),
     Miner = require("./miner"),
     AddressIndex = require("./addressIndex"),
-    crypto = require("crypto"),
-    _ = require("lodash");
+    ChainIndex = require("./chainIndex"),
+    crypto = require("crypto");
 
-const { getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList, getTxProof, getNewestBlock, initChain } = Blockchain;
+const {
+  getBlockChain, createNewBlock, getAccountBalance, getSpendableBalance, sendTx, getUTxOutList,
+  getTxProof, getNewestBlock, initChain, getBlockByHash, findTx
+} = Blockchain;
 const { getTxFee } = Transactions;
+const { indexByOutpoint, indexByAddress } = require("./utxo");
 const { startP2PServer, connectToPeers, getPeers } = P2P;
 const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance, getMnemonic, restoreFromMnemonic, GAP_LIMIT } = Wallet;
 const AddressIndexApi = require("./addressIndex");
 const { getMempool } = Mempool;
-const { isAddressValid, getBlockSubsidy, HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK } = Transactions;
+const {
+  isAddressValid, getBlockSubsidy, getTotalSupply,
+  HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK
+} = Transactions;
 const { COIN, DECIMALS } = require("./units");
 
 const PORT = process.env.HTTP_PORT || 3000;
@@ -155,9 +162,19 @@ app.route("/peers")
     }
   });
 
+/*
+ * 잔액.
+ *
+ * balance 는 블록에 담긴 것만 센 확정 잔액이고, spendable 은 mempool 까지
+ * 반영해 지금 실제로 보낼 수 있는 금액이다. 보내고 나면 그 코인은 아직
+ * 블록에 없지만 이미 남에게 간 것이라, 확정 잔액만 보여 주면 없는 돈이
+ * 있는 것처럼 보인다.
+ */
 app.get("/me/balance", requireWalletAuth, (req, res) => {
-  const balance = getAccountBalance();
-  res.send({ balance });
+  res.send({
+    balance: getAccountBalance(),
+    spendable: getSpendableBalance()
+  });
 });
 
 app.get("/me/address", requireWalletAuth, (req,res) => {
@@ -171,13 +188,77 @@ app.get("/me/address", requireWalletAuth, (req,res) => {
  * 갖게 된다. "내 주소"가 하나뿐이라는 전제가 더는 성립하지 않는다.
  */
 app.get("/me/addresses", requireWalletAuth, (req, res) => {
-  const uTxOuts = getUTxOutList();
+  // 주소마다 UTxOut 전체를 훑으면 주소 수 x UTxOut 수다.
+  // 색인을 한 번만 만들면 한 번 훑는 것으로 끝난다.
+  const balances = indexByAddress(getUTxOutList());
   res.send(
     getAddresses().map(address => ({
       address,
-      balance: getBalance(address, uTxOuts)
+      balance: balances.get(address) || 0
     }))
   );
+});
+
+/*
+ * 아직 블록에 담기지 않은, 내 지갑이 얽힌 트랜잭션.
+ *
+ * 지갑은 지금까지 확정된 내역만 볼 수 있었다. 보내고 나면 블록이 나올
+ * 때까지 아무 흔적도 없어서, 보내진 건지 알 수 없었다.
+ *
+ * "얼마를 썼는가"는 입력이 가리키는 이전 출력을 되짚어야 알 수 있고
+ * 그건 UTxOut 집합을 가진 노드만 할 수 있다. 주소 색인이 블록에 대해
+ * 하는 일을 mempool 에 대해 하는 셈이라, 응답 모양도 색인과 맞춘다.
+ */
+app.get("/me/pending", requireWalletAuth, (req, res) => {
+  const mine = new Set(getAddresses());
+  const mempool = getMempool();
+
+  // 확정된 출력에 더해 mempool 이 만든 출력도 되짚을 수 있어야 한다
+  // (확인을 기다리지 않고 연달아 보낸 경우)
+  const sources = indexByOutpoint(getUTxOutList());
+  for (const tx of mempool) {
+    tx.txOuts.forEach((txOut, index) => {
+      sources.set(`${tx.id}:${index}`, txOut);
+    });
+  }
+
+  const entries = [];
+  for (const tx of mempool) {
+    let received = 0;
+    let spent = 0;
+    let inputTotal = 0;
+
+    for (const txIn of tx.txIns) {
+      const source = sources.get(`${txIn.txOutId}:${txIn.txOutIndex}`);
+      if (source === undefined) {
+        continue;
+      }
+      inputTotal += source.amount;
+      if (mine.has(source.address)) {
+        spent += source.amount;
+      }
+    }
+    const outputTotal = tx.txOuts.reduce((sum, txOut) => sum + txOut.amount, 0);
+    for (const txOut of tx.txOuts) {
+      if (mine.has(txOut.address)) {
+        received += txOut.amount;
+      }
+    }
+
+    if (received > 0 || spent > 0) {
+      entries.push({
+        txId: tx.id,
+        blockIndex: null,
+        timestamp: null,
+        coinbase: false,
+        outputTotal,
+        received,
+        spent,
+        fee: Math.max(0, inputTotal - outputTotal)
+      });
+    }
+  }
+  res.send(entries);
 });
 
 // 받을 주소를 새로 하나 만든다
@@ -227,21 +308,36 @@ app.post("/me/restore", requireWalletAuth, (req, res) => {
 
 app.get("/blocks/:hash", (req, res) => {
   const { params : { hash } } = req;
-  const block = _.find(getBlockChain(), { hash });
+  const block = getBlockByHash(hash);
   if(block === undefined){
-    res.status(400).send("Block not found")
+    res.status(404).send("Block not found")
   }else{
     res.send(block);
   }
 });
 
+/*
+ * 트랜잭션 하나.
+ *
+ * 아직 블록에 담기지 않은 것(mempool)도 찾아 준다. 보낸 직후에 열어 볼 수
+ * 있어야 하기 때문이다 — 예전에는 체인에 없으면 그냥 "찾을 수 없음"이었다.
+ * 담긴 블록이 있으면 높이와 확인 수를 함께 준다.
+ */
 app.get("/transactions/:id", (req, res) => {
-  const tx = _(getBlockChain()).map(blocks => blocks.data).flatten().find({ id: req.params.id });
-  if(tx === undefined){
-    res.status(400).send("Tx not found")
-  }else{
-    res.send(tx);
+  const found = findTx(req.params.id);
+  if(found === null){
+    res.status(404).send("Tx not found")
+    return;
   }
+  const { tx, block, pending } = found;
+  res.send({
+    ...tx,
+    pending,
+    blockIndex: pending ? null : block.index,
+    blockHash: pending ? null : block.hash,
+    timestamp: pending ? null : block.timestamp,
+    confirmations: pending ? 0 : getNewestBlock().index - block.index + 1
+  });
 });
 
 app.route("/transactions")
@@ -327,15 +423,15 @@ app.get("/search/:query", (req, res) => {
     return;
   }
 
-  const block = _.find(getBlockChain(), { hash: query });
+  // 색인 조회. 예전에는 블록을, 그다음 트랜잭션 전체를 훑었다.
+  const block = getBlockByHash(query);
   if (block !== undefined) {
     res.send({ type: "block", hash: block.hash });
     return;
   }
 
-  const tx = _(getBlockChain()).map(b => b.data).flatten().find({ id: query });
-  if (tx !== undefined) {
-    res.send({ type: "tx", id: tx.id });
+  if (findTx(query) !== null) {
+    res.send({ type: "tx", id: query });
     return;
   }
 
@@ -344,26 +440,30 @@ app.get("/search/:query", (req, res) => {
 
 // 화폐 정책과 체인 상태
 app.get("/info", (req, res) => {
-  const chain = getBlockChain();
   const newest = getNewestBlock();
   const nextIndex = newest.index + 1;
 
   // 익스플로러가 통계를 내려고 체인 전체를 받지 않아도 되게 여기서 계산한다.
   // 수수료는 이미 유통 중이던 코인이 옮겨 간 것이라 발행량이 아니다.
   const mempool = getMempool();
-  const uTxOuts = getUTxOutList();
+  /*
+   * getTxFee 는 배열을 받으면 입력마다 그 배열을 훑는다. mempool 500건에
+   * UTxOut 2만 개면 폴링 한 번에 천만 번 비교다. 지갑과 익스플로러가
+   * 4초마다 부르는 자리라 색인을 한 번만 만들어 돌려 쓴다.
+   */
+  const unspent = indexByOutpoint(getUTxOutList());
   const mempoolFees = mempool.reduce(
-    (sum, tx) => sum + Math.max(0, getTxFee(tx, uTxOuts)),
+    (sum, tx) => sum + Math.max(0, getTxFee(tx, unspent)),
     0
   );
 
-  let txCount = 0;
-  let supply = 0;
-  for (const block of chain) {
-    const txs = block.data || [];
-    txCount += txs.length;
-    supply += getBlockSubsidy(block.index);
-  }
+  /*
+   * 예전에는 체인을 통째로 훑어 트랜잭션 수와 발행량을 셌다. 4초마다
+   * 부르는 자리에서 체인 길이에 비례하는 값을 낼 이유가 없다.
+   * 트랜잭션 수는 색인이 이미 알고, 발행량은 반감기 구간별로 계산한다.
+   */
+  const txCount = ChainIndex.getIndexedTxCount();
+  const supply = getTotalSupply(newest.index);
 
   res.send({
     height: newest.index,

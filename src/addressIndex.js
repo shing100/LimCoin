@@ -105,6 +105,28 @@ const rebuild = (chain, applyToUTxOuts) => {
 };
 
 /**
+ * blockIndex 가 cutBlockIndex 이상인 기록을 걷어 낸다 (체인 교체용).
+ *
+ * 예전에는 체인이 갈라질 때마다 색인을 통째로 다시 만들었다. 갈라지는 건
+ * 보통 마지막 한두 블록인데 체인 전체를 다시 훑는 셈이었다.
+ *
+ * 기록은 주소마다 블록 순서대로 쌓이므로, 뒤에서부터 자르면 된다.
+ */
+const rollbackTo = cutBlockIndex => {
+  for (const [address, list] of byAddress) {
+    let end = list.length;
+    while (end > 0 && list[end - 1].blockIndex >= cutBlockIndex) {
+      end--;
+    }
+    if (end === 0) {
+      byAddress.delete(address);
+    } else if (end < list.length) {
+      list.length = end;
+    }
+  }
+};
+
+/**
  * 주소의 트랜잭션 내역. 최신 것부터.
  */
 const getTransactions = (address, limit = 50, offset = 0) => {
@@ -124,6 +146,7 @@ module.exports = {
   reset,
   applyBlock,
   rebuild,
+  rollbackTo,
   getTransactions,
   hasAddress,
   getIndexedAddressCount

@@ -85,7 +85,11 @@ test("블록에 담겨 UTxO 가 사라지면 pool 에서도 빠진다", () => {
   assert.strictEqual(Mempool.getMempool().length, 0);
 });
 
-test("getMempool 은 복사본을 준다", () => {
+test("getMempool 이 준 배열을 밖에서 고쳐도 pool 은 그대로다", () => {
+  /*
+   * 얕은 복사다. 트랜잭션은 서명이 끝난 뒤로 아무도 고치지 않으므로
+   * (고치면 id 가 달라져 검증에서 떨어진다) 지켜야 할 것은 목록 자체다.
+   */
   const owner = makeWallet();
   const receiver = makeWallet();
   const uTxOuts = [utxo(owner, "c1", 10 * COIN)];
@@ -97,9 +101,10 @@ test("getMempool 은 복사본을 준다", () => {
   );
 
   const copy = Mempool.getMempool();
-  copy[0].txOuts[0].amount = 999;
-  // 밖에서 만진 것이 원본에 반영되면 안 된다
-  assert.notStrictEqual(Mempool.getMempool()[0].txOuts[0].amount, 999);
+  copy.push({ id: "밖에서 끼워 넣은 것" });
+  copy.splice(0, 1);
+  assert.strictEqual(Mempool.getMempool().length, 1);
+  assert.notStrictEqual(Mempool.getMempool()[0].id, "밖에서 끼워 넣은 것");
   Mempool.updateMempool([]);
 });
 

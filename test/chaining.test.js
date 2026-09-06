@@ -8,7 +8,8 @@ const assert = require("node:assert");
 const elliptic = require("elliptic");
 
 const {
-  getTxId, processTxs, updateUTxOuts, createCoinbaseTx, getBlockSubsidy
+  getTxId, processTxs, updateUTxOuts, createCoinbaseTx, getBlockSubsidy,
+  sumBlockFees
 } = require("../src/transactions");
 const Mempool = require("../src/memPool");
 const { toHexString } = require("../src/utils");
@@ -205,6 +206,74 @@ test("이어 쓴 트랜잭션들이 실제로 한 블록에 담겨 통과한다"
     "mempool 에서 골라 담은 그대로 블록이 유효해야 한다"
   );
   Mempool.updateMempool([]);
+});
+
+test("이어 쓴 트랜잭션의 수수료도 제대로 세어진다", () => {
+  /*
+   * 블록 이전의 UTxOut 만 보고 세면, 부모가 mempool 에 있는 자식의 입력이
+   * "없는 출력"이 되어 수수료가 크게 음수로 나온다. 그러면 코인베이스가
+   * 보조금보다 적게 가져가는 블록을 만들어 스스로 거부하게 된다.
+   * 실제로 지갑이 이어 보내기를 하게 되자마자 채굴이 막혔다.
+   */
+  const alice = makeWallet();
+  const bob = makeWallet();
+  const miner = makeWallet();
+  const uTxOuts = [seedUTxOut(alice, "seed", 10 * COIN)];
+
+  Mempool.updateMempool([]);
+  const fee = parseLim("0.1");
+  const change1 = 10 * COIN - 3 * COIN - fee;
+  const t1 = spend(alice, bob.address, "seed", 0, 3 * COIN, change1);
+  Mempool.addToMempool(t1, uTxOuts);
+  const t2 = spend(alice, bob.address, t1.id, 1, 2 * COIN, change1 - 2 * COIN - fee);
+  Mempool.addToMempool(t2, uTxOuts);
+
+  const selected = Mempool.selectTxsForBlock(Mempool.getMempool(), uTxOuts, 10);
+  const totalFees = sumBlockFees(selected, uTxOuts);
+
+  assert.strictEqual(totalFees, fee * 2, "두 건의 수수료가 그대로 더해져야 한다");
+  assert.ok(totalFees > 0, "이어 쓴 입력을 못 되짚으면 음수가 된다");
+
+  // 그 합을 그대로 가져가는 코인베이스로 블록이 통과해야 한다
+  const coinbase = createCoinbaseTx(miner.address, 1, totalFees);
+  assert.ok(
+    Array.isArray(processTxs([coinbase, ...selected], uTxOuts, 1)),
+    "센 수수료대로 만든 블록이 유효해야 한다"
+  );
+  Mempool.updateMempool([]);
+});
+
+test("이어 쓴 자식도 수수료율 줄 세우기에서 제 값을 받는다", () => {
+  // 확정된 UTxOut 만으로 되짚으면 자식의 수수료율이 크게 음수가 되어
+  // 언제나 꼴찌가 된다.
+  const alice = makeWallet();
+  const bob = makeWallet();
+  const uTxOuts = [
+    seedUTxOut(alice, "seedA", 10 * COIN),
+    seedUTxOut(alice, "seedB", 10 * COIN)
+  ];
+
+  Mempool.updateMempool([]);
+  // 부모: 수수료 0.01, 자식: 수수료 1 (아주 높다)
+  const parentFee = parseLim("0.01");
+  const childFee = parseLim("1");
+  const parentChange = 10 * COIN - 1 * COIN - parentFee;
+  const parent = spend(alice, bob.address, "seedA", 0, 1 * COIN, parentChange);
+  const child = spend(alice, bob.address, parent.id, 1, 1 * COIN, parentChange - 1 * COIN - childFee);
+  // 견줄 상대: 수수료 0.5 짜리 독립 트랜잭션
+  const other = spend(alice, bob.address, "seedB", 0, 1 * COIN, 10 * COIN - 1 * COIN - parseLim("0.5"));
+
+  const picked = Mempool.selectTxsForBlock([other, child, parent], uTxOuts, 10);
+  assert.strictEqual(picked.length, 3);
+  // 자식이 부모를 끌고 올라와야 한다. 부모 없이 자식만 담기면 안 된다.
+  assert.ok(
+    picked.indexOf(parent) < picked.indexOf(child),
+    "부모가 자식보다 먼저"
+  );
+  assert.strictEqual(
+    sumBlockFees(picked, uTxOuts),
+    parentFee + childFee + parseLim("0.5")
+  );
 });
 
 /* ------------------------------------------- 체인 교체 (reorg) */

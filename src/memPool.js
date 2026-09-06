@@ -1,5 +1,4 @@
-const _ = require("lodash"),
-  Transactions = require("./transactions");
+const Transactions = require("./transactions");
 
 const { validateTx, getTxFee, updateUTxOuts } = Transactions;
 const { keyOf, indexByOutpoint } = require("./utxo");
@@ -10,7 +9,18 @@ const MAX_MEMPOOL_SIZE = 500;
 
 let mempool = [];
 
-const getMempool = () => _.cloneDeep(mempool);
+/*
+ * mempool 사본.
+ *
+ * 얕은 복사다. 배열만 새로 만들고 트랜잭션 객체는 그대로 넘긴다.
+ * 트랜잭션은 서명이 끝난 순간부터 아무도 고치지 않는다(고치면 id 가
+ * 달라져 검증에서 떨어진다). 그러니 지켜야 할 것은 "밖에서 pool 에
+ * 넣거나 뺄 수 없다"는 것뿐이고, 그건 배열만 새로 만들면 된다.
+ *
+ * 예전에는 _.cloneDeep 이었다. /info 는 지갑과 익스플로러가 4초마다
+ * 부르는데, 500건짜리 mempool 을 통째로 복제하는 데 1.8ms 가 들었다.
+ */
+const getMempool = () => mempool.slice();
 
 // 지금 pool 이 쓰기로 예약한 outpoint 들
 const spentInPool = pool => {
@@ -99,16 +109,26 @@ const selectTxsForBlock = (candidates, uTxOutList, limit) => {
 
   // 부모가 만든 출력을 자식이 쓰는 경우가 있으므로, 수수료율만 보고 자를 수
   // 없다. 부모 없이 자식만 담기면 그 블록은 검증에서 떨어진다.
-  const confirmed = indexByOutpoint(uTxOutList);
   const producedBy = new Map(); // outpoint -> 그것을 만든 tx
+
+  /*
+   * 수수료를 구하려면 입력이 가리키는 출력을 되짚어야 한다. 확정된 것만
+   * 보면 부모가 mempool 에 있는 자식은 입력이 "없는 출력"이 되어 수수료가
+   * 크게 음수로 나오고, 줄 세우기가 뒤집힌다. 후보들이 만든 출력도 함께
+   * 넣어 둔다.
+   */
+  const sources = indexByOutpoint(uTxOutList);
   for (const tx of candidates) {
-    tx.txOuts.forEach((txOut, index) => producedBy.set(keyOf(tx.id, index), tx));
+    tx.txOuts.forEach((txOut, index) => {
+      producedBy.set(keyOf(tx.id, index), tx);
+      sources.set(keyOf(tx.id, index), txOut);
+    });
   }
 
   const byFeeRate = candidates
     .map(tx => ({
       tx,
-      feeRate: getTxFee(tx, confirmed) / Math.max(1, tx.txIns.length)
+      feeRate: getTxFee(tx, sources) / Math.max(1, tx.txIns.length)
     }))
     .sort((a, b) => b.feeRate - a.feeRate)
     .map(entry => entry.tx);
