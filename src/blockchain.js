@@ -4,6 +4,7 @@ const CryptoJS = require("crypto-js"),
   Mempool = require("./memPool"),
   Transactions = require("./transactions"),
   Merkle = require("./merkle"),
+  Store = require("./store"),
   hexToBinary = require("hex-to-binary");
 
 const { getMerkleRoot, getMerkleProof } = Merkle;
@@ -81,7 +82,7 @@ const createHash = (index, previousHash, timestamp, merkleRoot, difficulty, nonc
   ).toString();
 
 // 코인 기반 새로운 블록 생성하기
-const createNewBlock = () => {
+const createNewBlock = async () => {
   const nextIndex = getNewestBlock().index + 1;
   const uTxOuts = getUTxOutList();
 
@@ -100,23 +101,29 @@ const createNewBlock = () => {
   // 채굴자는 보조금에 더해 담은 트랜잭션들의 수수료를 가져간다 (백서 6장)
   const coinbaseTx = createCoinbaseTx(getPublicFromWallet(), nextIndex, totalFees);
 
-  return createNewRawBlock([coinbaseTx, ...selected]);
+  return await createNewRawBlock([coinbaseTx, ...selected]);
 };
 
 // 새 블록 추가하기
-const createNewRawBlock = data => {
+const createNewRawBlock = async data => {
   const previousBlock = getNewestBlock();
   const newBlockIndex = previousBlock.index + 1;
   const newTimestamp = getTimestamp();
   const difficulty = findDifficulty();
-  const newBlock = findBlock(
+  const newBlock = await findBlockAsync(
     newBlockIndex,
     previousBlock.hash,
     newTimestamp,
     data,
     difficulty
   );
-  addBlockToChain(newBlock); // 블록체인에 추가
+  // 채굴하는 사이에 다른 노드가 먼저 블록을 올렸을 수 있다
+  if (newBlock.previousHash !== getNewestBlock().hash) {
+    throw Error("채굴하는 동안 다른 블록이 먼저 들어왔습니다. 다시 시도하세요.");
+  }
+  if (!addBlockToChain(newBlock)) {
+    throw Error("채굴한 블록이 검증을 통과하지 못했습니다");
+  }
   require("./p2p").broadcastNewBlock(); // 연결시 브로드케스팅
   return newBlock;
 }
@@ -165,6 +172,33 @@ const findBlock = (index, previousHash, timestamp, data, difficulty) => {
       }
       nonce++
     }
+};
+
+/*
+ * 위 findBlock 은 동기 while 루프라 도는 동안 HTTP 응답도 P2P 소켓도
+ * 전부 멈춘다. 난이도 15 는 평균 3만 해시라 1초 남짓이지만, 20 이면
+ * 100만 해시다.
+ *
+ * 같은 일을 하되 일정 횟수마다 이벤트 루프에 양보한다. 진짜 채굴이라면
+ * worker_threads 로 빼야 하지만, 그러면 코어가 워커 진입점을 따로 갖게
+ * 되어 배우기에는 오히려 흐려진다.
+ */
+const HASHES_PER_TICK = 20000;
+
+const findBlockAsync = async (index, previousHash, timestamp, data, difficulty) => {
+  const merkleRoot = getMerkleRoot(data);
+  let nonce = 0;
+  while (true) {
+    for (let i = 0; i < HASHES_PER_TICK; i++) {
+      const hash = createHash(index, previousHash, timestamp, merkleRoot, difficulty, nonce);
+      if (hashMatchesDifficulty(hash, difficulty)) {
+        return new Block(index, hash, previousHash, timestamp, merkleRoot, data, difficulty, nonce);
+      }
+      nonce++;
+    }
+    // 여기서 다른 요청과 소켓 메시지가 처리된다
+    await new Promise(resolve => setImmediate(resolve));
+  }
 };
 // 난이도 0 찾기 조정
 const hashMatchesDifficulty = (hash, difficulty = 15) => {
@@ -264,15 +298,62 @@ const replaceChain = candidateChain => {
     validChain &&
     sumDifficulty(candidateChain) > sumDifficulty(getBlockChain())
   ){
+    // 되돌려지는 블록에 담겼던 트랜잭션은 아직 유효할 수 있다.
+    // 예전에는 그대로 사라져 버렸다.
+    const orphaned = collectOrphanedTxs(blockchain, candidateChain);
+
     blockchain = candidateChain;
     uTxOuts = foreignUTxOuts;
     updateMempool(uTxOuts);
+    // 체인 교체는 append 로 표현할 수 없으므로 파일을 새로 쓴다
+    Store.writeBlocks(blockchain);
+    reinstateTxs(orphaned);
     require('./p2p').broadcastNewBlock();
     return true;
   }else{
     return false;
   }
 };
+/*
+ * 체인이 교체될 때, 밀려난 블록에만 있던 트랜잭션을 추린다.
+ * 새 체인에 이미 담겨 있는 것은 뺀다.
+ */
+const collectOrphanedTxs = (oldChain, newChain) => {
+  const kept = new Set();
+  newChain.forEach(block =>
+    (block.data || []).forEach(tx => kept.add(tx.id))
+  );
+
+  const orphaned = [];
+  oldChain.forEach(block =>
+    (block.data || []).forEach(tx => {
+      // 코인베이스는 그 블록에만 속하므로 되살리지 않는다
+      const isCoinbase = tx.txIns.length === 1 && tx.txIns[0].txOutId === "";
+      if (!isCoinbase && !kept.has(tx.id)) {
+        orphaned.push(tx);
+      }
+    })
+  );
+  return orphaned;
+};
+
+// 밀려난 트랜잭션을 mempool 로 되돌린다.
+// 새 체인 기준으로 더는 유효하지 않은 것은 조용히 버린다.
+const reinstateTxs = txs => {
+  let restored = 0;
+  for (const tx of txs) {
+    try {
+      addToMempool(tx, getUTxOutList());
+      restored++;
+    } catch (e) {
+      // 이미 다른 트랜잭션이 같은 UTxO 를 썼거나 유효하지 않게 된 경우
+    }
+  }
+  if (restored > 0) {
+    console.log(`체인 교체로 밀려난 트랜잭션 ${restored}건을 mempool 로 되돌렸습니다`);
+  }
+};
+
 // 블록 체인 더하기
 const addBlockToChain = candidateBlock => {
   if(isBlockValid(candidateBlock, getNewestBlock())){
@@ -285,9 +366,10 @@ const addBlockToChain = candidateBlock => {
       console.log("Couldnt process txs");
       return false;
     }else{
-        getBlockChain().push(candidateBlock);
+        blockchain.push(candidateBlock);
         uTxOuts = processedTxs;
         updateMempool(uTxOuts);
+        Store.appendBlock(candidateBlock);
         return true;
     }
     //return true;
@@ -317,6 +399,60 @@ const getTxProof = txId => {
   return null;
 };
 
+/**
+ * 저장된 체인을 읽어 이어서 시작한다. 서버가 뜰 때 한 번 부른다.
+ *
+ * 저장된 블록을 하나씩 다시 검증하며 UTxOut 집합을 재구성한다. 검증에
+ * 실패하는 블록이 나오면 거기서 멈춘다 — 뒤쪽은 P2P 로 다시 받으면 된다.
+ */
+const initChain = (dataDir) => {
+  Store.open(dataDir);
+  const persisted = Store.loadBlocks();
+
+  if (persisted.length === 0) {
+    // 처음 뜨는 노드. 제네시스만 저장해 둔다.
+    Store.appendBlock(genesisBlock);
+    return { restored: 0, height: 0 };
+  }
+
+  if (persisted[0].hash !== genesisBlock.hash) {
+    // genesis.json 을 새로 만들었는데 옛 체인이 남아 있는 경우
+    console.log(
+      "저장된 체인의 제네시스가 지금 genesis.json 과 다릅니다. 저장본을 버리고 새로 시작합니다."
+    );
+    Store.writeBlocks([genesisBlock]);
+    return { restored: 0, height: 0 };
+  }
+
+  let chain = [persisted[0]];
+  let utxos = processTxs(persisted[0].data, [], 0);
+
+  for (let i = 1; i < persisted.length; i++) {
+    const block = persisted[i];
+    if (!isBlockValid(block, chain[chain.length - 1])) {
+      console.log(`저장된 블록 #${block.index} 이 유효하지 않습니다. 여기까지만 복원합니다.`);
+      break;
+    }
+    const processed = processTxs(block.data, utxos, block.index);
+    if (processed === null) {
+      console.log(`저장된 블록 #${block.index} 의 트랜잭션을 처리할 수 없습니다. 여기까지만 복원합니다.`);
+      break;
+    }
+    chain.push(block);
+    utxos = processed;
+  }
+
+  blockchain = chain;
+  uTxOuts = utxos;
+
+  // 중간에 잘렸다면 파일도 맞춰 준다
+  if (chain.length !== persisted.length) {
+    Store.writeBlocks(chain);
+  }
+
+  return { restored: chain.length, height: chain[chain.length - 1].index };
+};
+
 // TxOutList 가져오기
 const getUTxOutList = () => _.cloneDeep(uTxOuts);
 
@@ -337,6 +473,7 @@ const handleIncomingTx = (tx) => {
 
 module.exports = {
   replaceChain,
+  initChain,
   getTxProof,
   calculateNewDifficulty,
   addBlockToChain,

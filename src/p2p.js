@@ -8,6 +8,16 @@ const { getMempool } = Mempool;
 const sockets = [];
 const KEEP_ALIVE_INTERVAL = 30000;
 
+// 피어 수와 메시지 크기에 상한을 둔다.
+// 예전에는 둘 다 없어서, 아무나 연결을 무한히 열거나 거대한 메시지 하나로
+// 노드의 메모리를 밀어낼 수 있었다.
+const MAX_PEERS = 32;
+const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
+
+// 이미 붙은 피어에 또 연결하지 않도록 주소를 기억한다.
+// 예전에는 같은 피어에 connectToPeers 를 여러 번 부르면 소켓이 계속 쌓였다.
+const dialedPeers = new Set();
+
 // Message Type
 const GET_LATEST = "GET_LATEST";
 const GET_ALL = "GET_ALL";
@@ -56,8 +66,13 @@ const getSockets = () => sockets;
 
 // 서버 시작하기
 const startP2PServer = server => {
-  const wsServer = new WebSockets.Server({server});
+  const wsServer = new WebSockets.Server({ server, maxPayload: MAX_MESSAGE_BYTES });
   wsServer.on("connection", ws => {
+    if (sockets.length >= MAX_PEERS) {
+      console.log(`피어 수 상한(${MAX_PEERS})에 걸려 연결을 거절했습니다`);
+      ws.close();
+      return;
+    }
     initSocketConnection(ws);
   });
   wsServer.on("error", () => {
@@ -189,6 +204,9 @@ const broadcastMempool = () => sendMessageToAll(returnMempool());
 const handleSocketError = ws => {
   const closeSocketConnetion = ws => {
     clearInterval(ws.keepAliveId);
+    if (ws.peerUrl) {
+      dialedPeers.delete(ws.peerUrl);
+    }
     ws.close();
     const index = sockets.indexOf(ws);
     if (index !== -1) {
@@ -200,17 +218,37 @@ const handleSocketError = ws => {
 };
 
 const connectToPeers = newPeer => {
-  const ws = new WebSockets(newPeer);
+  if (dialedPeers.has(newPeer)) {
+    console.log(`이미 연결한 피어입니다: ${newPeer}`);
+    return;
+  }
+  if (sockets.length >= MAX_PEERS) {
+    throw Error(`피어 수 상한(${MAX_PEERS})에 도달했습니다`);
+  }
+
+  const ws = new WebSockets(newPeer, { maxPayload: MAX_MESSAGE_BYTES });
+  dialedPeers.add(newPeer);
+  ws.peerUrl = newPeer;
+
   ws.on("open", () => {
       initSocketConnection(ws);
   });
-  ws.on("error", () => console.log("Connection failed"));
-  ws.on("close", () => console.log("Connection closed"));
+  ws.on("error", () => {
+    console.log("Connection failed");
+    dialedPeers.delete(newPeer);
+  });
+  ws.on("close", () => {
+    console.log("Connection closed");
+    dialedPeers.delete(newPeer);
+  });
 };
 
 // 연결된 피어 주소 목록
 const getPeers = () =>
   sockets.map(ws => {
+    if (ws.peerUrl) {
+      return ws.peerUrl;
+    }
     const socket = ws._socket;
     return socket ? `${socket.remoteAddress}:${socket.remotePort}` : "unknown";
   });

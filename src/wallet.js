@@ -4,6 +4,8 @@ const elliptic = require("elliptic"),
   _ = require("lodash"),
   Transactions = require("./transactions");
 
+const { keyOf, outpointKey } = require("./utxo");
+
 const {
   getPublicKey,
   getTxId,
@@ -74,26 +76,18 @@ const createTxOuts = (receiverAddress, myAddress, amount, leftOverAmount) => {
   }
 };
 
+// mempool 에서 이미 쓰기로 예약된 UTxOut 은 빼고 고른다.
+// 예전에는 uTxOutList x mempool txIns 이중 루프였다.
 const filterUTxOutsFromMempool = (uTxOutList, mempool) => {
-  const txIns = _(mempool)
-    .map(tx => tx.txIns)
-    .flatten()
-    .value();
+  const pending = new Set(
+    _(mempool)
+      .map(tx => tx.txIns)
+      .flatten()
+      .map(txIn => keyOf(txIn.txOutId, txIn.txOutIndex))
+      .value()
+  );
 
-  const removables = [];
-
-  for (const uTxOut of uTxOutList) {
-    const txIn = _.find(
-      txIns,
-      txIn =>
-        txIn.txOutIndex === uTxOut.txOutIndex && txIn.txOutId === uTxOut.txOutId
-    );
-    if (txIn !== undefined) {
-      removables.push(uTxOut);
-    }
-  }
-
-  return _.without(uTxOutList, ...removables);
+  return uTxOutList.filter(uTxOut => !pending.has(outpointKey(uTxOut)));
 };
 
 /*

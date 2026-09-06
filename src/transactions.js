@@ -4,6 +4,7 @@ const CryptoJS = require("crypto-js"),
   utils = require("./utils");
 
 const { COIN } = require("./units");
+const { keyOf, outpointKey, indexByOutpoint } = require("./utxo");
 
 const ec = new elliptic.ec("secp256k1");
 
@@ -79,8 +80,12 @@ const getTxId = tx => {
 // genesisTx id 값을 알아내기 위한 로그
 //console.log(getTxId(genesisTx));
 
-const findUTxOut = (txOutId, txOutIndex, uTxOutList) => {
-  return uTxOutList.find(
+// uTxOuts 가 Map(색인)이면 O(1), 배열이면 예전처럼 훑는다.
+const findUTxOut = (txOutId, txOutIndex, uTxOuts) => {
+  if (uTxOuts instanceof Map) {
+    return uTxOuts.get(keyOf(txOutId, txOutIndex));
+  }
+  return uTxOuts.find(
     uTxO => uTxO.txOutId === txOutId && uTxO.txOutIndex === txOutIndex
   );
 };
@@ -123,15 +128,17 @@ const updateUTxOuts = (newTxs, uTxOutList) => {
     )
     .reduce((a, b) => a.concat(b), []);
 
-  const spentTxOuts = newTxs
-    .map(tx => tx.txIns)
-    .reduce((a, b) => a.concat(b), [])
-    .map(txIn => new UTxOut(txIn.txOutId, txIn.txOutIndex, "", 0));
+  // 이번 블록에서 쓰여 없어지는 outpoint 들
+  const spent = new Set(
+    newTxs
+      .map(tx => tx.txIns)
+      .reduce((a, b) => a.concat(b), [])
+      .map(txIn => keyOf(txIn.txOutId, txIn.txOutIndex))
+  );
 
-  const resultingUTxOuts = uTxOutList
-    .filter(uTxO => !findUTxOut(uTxO.txOutId, uTxO.txOutIndex, spentTxOuts))
+  return uTxOutList
+    .filter(uTxO => !spent.has(outpointKey(uTxO)))
     .concat(newUTxOuts);
-  return resultingUTxOuts;
 };
 
 // TxIn 구조체 유효성 검사
@@ -221,10 +228,8 @@ const isTxStructureValid = tx => {
   }
 };
 
-const validateTxIn = (txIn, tx, uTxOutList) => {
-  const wantedTxOut = uTxOutList.find(
-    uTxO => uTxO.txOutId === txIn.txOutId && uTxO.txOutIndex === txIn.txOutIndex
-  );
+const validateTxIn = (txIn, tx, uTxOuts) => {
+  const wantedTxOut = findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOuts);
   if (wantedTxOut === undefined) {
     console.log(`Didn't find the wanted uTxOut, the tx: ${tx} is invalid`);
     return false;
@@ -240,13 +245,13 @@ const validateTxIn = (txIn, tx, uTxOutList) => {
   }
 };
 
-const getAmountInTxIn = (txIn, uTxOutList) => {
-  const uTxOut = findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOutList);
+const getAmountInTxIn = (txIn, uTxOuts) => {
+  const uTxOut = findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOuts);
   return uTxOut === undefined ? 0 : uTxOut.amount;
 };
 
-const sumTxIns = (tx, uTxOutList) =>
-  tx.txIns.map(txIn => getAmountInTxIn(txIn, uTxOutList)).reduce((a, b) => a + b, 0);
+const sumTxIns = (tx, uTxOuts) =>
+  tx.txIns.map(txIn => getAmountInTxIn(txIn, uTxOuts)).reduce((a, b) => a + b, 0);
 
 const sumTxOuts = tx =>
   tx.txOuts.map(txOut => txOut.amount).reduce((a, b) => a + b, 0);
@@ -261,9 +266,11 @@ const sumTxOuts = tx =>
  * 예전에는 입력합과 출력합이 정확히 같아야만 통과시켰다. 그래서 수수료를
  * 낼 방법이 아예 없었고, 채굴자에게는 보조금 말고 아무 유인이 없었다.
  */
-const getTxFee = (tx, uTxOutList) => sumTxIns(tx, uTxOutList) - sumTxOuts(tx);
+const getTxFee = (tx, uTxOuts) => sumTxIns(tx, uTxOuts) - sumTxOuts(tx);
 
-const validateTx = (tx, uTxOutList) => {
+// 블록 단위로 검증할 때는 색인을 한 번만 만들어 돌려 쓴다.
+// 낱개로 부를 때는 기본값이 알아서 만든다(기본 인자는 필요할 때만 계산된다).
+const validateTx = (tx, uTxOutList, uTxOuts = indexByOutpoint(uTxOutList)) => {
   if (!isTxStructureValid(tx)) {
     console.log("Tx structure is invalid");
     return false;
@@ -275,7 +282,7 @@ const validateTx = (tx, uTxOutList) => {
   }
 
   const hasValidTxIns = tx.txIns
-    .map(txIn => validateTxIn(txIn, tx, uTxOutList))
+    .map(txIn => validateTxIn(txIn, tx, uTxOuts))
     .every(isValid => isValid === true);
 
   if (!hasValidTxIns) {
@@ -285,7 +292,7 @@ const validateTx = (tx, uTxOutList) => {
 
   // 출력이 입력보다 많으면 무에서 돈을 만들어 내는 것이다.
   // 반대로 모자란 만큼은 수수료로 채굴자에게 간다.
-  const fee = getTxFee(tx, uTxOutList);
+  const fee = getTxFee(tx, uTxOuts);
   if (fee < 0) {
     console.log(`The tx: ${tx.id} spends more than its inputs hold`);
     return false;
@@ -386,13 +393,14 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
 
   // 일반 트랜잭션을 먼저 검증해야 코인베이스가 가져갈 수수료 합을 알 수 있다
   const nonCoinbaseTxs = txs.slice(1);
+  const uTxOuts = indexByOutpoint(uTxOutList);
   let totalFees = 0;
   for (const tx of nonCoinbaseTxs) {
-    if (!validateTx(tx, uTxOutList)) {
+    if (!validateTx(tx, uTxOutList, uTxOuts)) {
       console.log(`The tx ${tx.id} in this block is invalid`);
       return false;
     }
-    totalFees += getTxFee(tx, uTxOutList);
+    totalFees += getTxFee(tx, uTxOuts);
   }
 
   if (!validateCoinbaseTx(txs[0], blockIndex, totalFees)) {
