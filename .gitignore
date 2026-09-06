@@ -4,7 +4,8 @@ node_modules/
 # 이 프로젝트는 yarn 을 쓴다. 락파일이 두 개면 서로 어긋난다.
 package-lock.json
 
-# 지갑 개인키 — 절대 커밋하지 말 것
+# 지갑 — 씨앗이 들어 있다. 절대 커밋하지 말 것
+src/wallet.json
 src/privateKey
 
 # 로그

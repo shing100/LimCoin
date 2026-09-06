@@ -8,12 +8,13 @@ const express = require("express"),
     Wallet = require("./wallet"),
     Transactions = require("./transactions"),
     Miner = require("./miner"),
+    AddressIndex = require("./addressIndex"),
     crypto = require("crypto"),
     _ = require("lodash");
 
 const { getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList, getTxProof, getNewestBlock, initChain } = Blockchain;
 const { startP2PServer, connectToPeers, getPeers } = P2P;
-const { initWallet, getPublicFromWallet, getBalance } = Wallet;
+const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance } = Wallet;
 const { getMempool } = Mempool;
 const { isAddressValid, getBlockSubsidy, HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK } = Transactions;
 const { COIN, DECIMALS } = require("./units");
@@ -141,7 +142,28 @@ app.get("/me/balance", requireWalletAuth, (req, res) => {
 });
 
 app.get("/me/address", requireWalletAuth, (req,res) => {
-  res.send(getPublicFromWallet());
+  res.send(getReceiveAddress());
+});
+
+/*
+ * 지갑이 가진 모든 주소와 각각의 잔액.
+ *
+ * 백서 10장대로 거스름돈을 새 주소로 받으므로, 지갑은 주소를 여러 개
+ * 갖게 된다. "내 주소"가 하나뿐이라는 전제가 더는 성립하지 않는다.
+ */
+app.get("/me/addresses", requireWalletAuth, (req, res) => {
+  const uTxOuts = getUTxOutList();
+  res.send(
+    getAddresses().map(address => ({
+      address,
+      balance: getBalance(address, uTxOuts)
+    }))
+  );
+});
+
+// 받을 주소를 새로 하나 만든다
+app.post("/me/address", requireWalletAuth, (req, res) => {
+  res.send({ address: getNewAddress() });
 });
 
 app.get("/blocks/:hash", (req, res) => {
@@ -291,7 +313,8 @@ app.get("/info", (req, res) => {
     currentSubsidy: getBlockSubsidy(nextIndex),
     nextHalvingAtHeight:
       (Math.floor(nextIndex / HALVING_INTERVAL) + 1) * HALVING_INTERVAL,
-    maxTxsPerBlock: MAX_TXS_PER_BLOCK
+    maxTxsPerBlock: MAX_TXS_PER_BLOCK,
+    indexedAddresses: AddressIndex.getIndexedAddressCount()
   });
 });
 
@@ -303,6 +326,39 @@ app.get("/address/:address", (req, res) => {
   }
   const balance = getBalance(address, getUTxOutList());
   res.send({ balance });
+});
+
+/*
+ * 주소의 트랜잭션 내역.
+ *
+ * 예전에는 지갑도 익스플로러도 블록을 전부 받아다 각자 훑었다. 그래서
+ * 지갑 내역이 "최근 500블록"으로 잘렸고, 같은 계산을 셋이 따로 했다.
+ * 노드가 블록을 붙일 때 한 번만 색인해 두면 된다.
+ *
+ * received / spent 를 그대로 준다. 순수입은 received - spent 이고,
+ * 둘 다 0 이 아니면서 차이가 나면 그 차액이 수수료를 포함한 실제 지출이다.
+ */
+app.get("/address/:address/transactions", (req, res) => {
+  const { params : { address } } = req;
+  if (!isAddressValid(address)) {
+    res.status(400).send("Invalid address");
+    return;
+  }
+  const limit = clampInt(req.query.limit, DEFAULT_PAGE, MAX_PAGE);
+  const offset = clampInt(req.query.offset, 0, Number.MAX_SAFE_INTEGER);
+  const { total, transactions } = AddressIndex.getTransactions(address, limit, offset);
+  res.set("X-Total-Count", String(total));
+  res.send(transactions);
+});
+
+// 주소가 가진 미사용 출력. 지갑이 직접 코인을 고를 때 쓴다.
+app.get("/address/:address/utxos", (req, res) => {
+  const { params : { address } } = req;
+  if (!isAddressValid(address)) {
+    res.status(400).send("Invalid address");
+    return;
+  }
+  res.send(getUTxOutList().filter(uTxOut => uTxOut.address === address));
 });
 
 // HTTP + P2P 서버를 띄운다. 포트를 넘기면 그 포트를 쓴다(Electron 지갑용).

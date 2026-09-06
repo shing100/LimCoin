@@ -10,34 +10,32 @@
  * 이미 src/privateKey 가 있으면 덮어쓰지 않는다(--force 로 강제).
  */
 const CryptoJS = require("crypto-js"),
-  elliptic = require("elliptic"),
   fs = require("fs"),
   path = require("path");
 
 const { getTxId, getBlockSubsidy } = require("../src/transactions");
 const { getMerkleRoot } = require("../src/merkle");
 const { formatLim } = require("../src/units");
-
-const ec = new elliptic.ec("secp256k1");
+const HD = require("../src/hdwallet");
 
 const GENESIS_DIFFICULTY = 15;
 
-const privateKeyLocation = path.join(__dirname, "..", "src", "privateKey");
+const walletLocation = path.join(__dirname, "..", "src", "wallet.json");
 const genesisLocation = path.join(__dirname, "..", "src", "genesis.json");
 
 const force = process.argv.includes("--force");
 
-if (fs.existsSync(privateKeyLocation) && !force) {
+if (fs.existsSync(walletLocation) && !force) {
   console.error(
-    `이미 ${privateKeyLocation} 가 있습니다.\n` +
+    `이미 ${walletLocation} 가 있습니다.\n` +
       `덮어쓰면 기존 지갑의 잔액에 접근할 수 없게 됩니다. 정말 새로 만들려면 --force 를 주세요.`
   );
   process.exit(1);
 }
 
-const keyPair = ec.genKeyPair();
-const privateKey = keyPair.getPrivate().toString(16);
-const address = keyPair.getPublic().encode("hex");
+// 씨앗 하나에서 필요한 만큼 주소를 파생한다(BIP32). 백업할 것은 씨앗뿐이다.
+const seed = HD.generateSeed();
+const address = HD.getPublicKey(HD.derivePrivateKey(seed, HD.RECEIVE, 0));
 
 // 제네시스 코인베이스는 높이 0 의 보조금을 그대로 받는다(수수료 없음).
 const genesisTx = {
@@ -69,7 +67,10 @@ genesisBlock.hash = CryptoJS.SHA256(
     genesisBlock.nonce
 ).toString();
 
-fs.writeFileSync(privateKeyLocation, privateKey);
+fs.writeFileSync(
+  walletLocation,
+  JSON.stringify({ version: 1, seed, nextReceive: 1, nextChange: 0, imported: [] }, null, 2) + "\n"
+);
 fs.writeFileSync(genesisLocation, JSON.stringify(genesisBlock, null, 2) + "\n");
 
 console.log("새 제네시스 블록을 만들었습니다.");
@@ -77,5 +78,5 @@ console.log("  주소   :", address);
 console.log("  프리마인:", formatLim(genesisTx.txOuts[0].amount), "LIM");
 console.log("  머클루트:", genesisBlock.merkleRoot);
 console.log("  블록해시:", genesisBlock.hash);
-console.log("  개인키 :", privateKeyLocation, "(커밋 금지)");
+console.log("  지갑   :", walletLocation, "(씨앗이 들어 있다. 커밋 금지)");
 console.log("  제네시스:", genesisLocation, "(커밋 대상)");

@@ -5,11 +5,12 @@ const CryptoJS = require("crypto-js"),
   Transactions = require("./transactions"),
   Merkle = require("./merkle"),
   Store = require("./store"),
+  AddressIndex = require("./addressIndex"),
   hexToBinary = require("hex-to-binary");
 
 const { getMerkleRoot, getMerkleProof } = Merkle;
 
-const { getBalance, getPublicFromWallet, createTx, getPrivateFromWallet  } = Wallet;
+const { getWalletBalance, getPublicFromWallet, createTx } = Wallet;
 
 const { createCoinbaseTx, processTxs, getTxFee, MAX_TXS_PER_BLOCK } = Transactions;
 
@@ -65,6 +66,7 @@ const genesisBlock = new Block(
 let blockchain = [genesisBlock];
 
 let uTxOuts = processTxs(blockchain[0].data, [], 0);
+AddressIndex.applyBlock(genesisBlock, []);
 
 // 새로운 블록 가져오기
 const getNewestBlock = () => blockchain[blockchain.length - 1];
@@ -304,6 +306,8 @@ const replaceChain = candidateChain => {
 
     blockchain = candidateChain;
     uTxOuts = foreignUTxOuts;
+    // 밀려난 블록의 기록이 남으면 안 되므로 통째로 다시 만든다
+    rebuildAddressIndex();
     updateMempool(uTxOuts);
     // 체인 교체는 append 로 표현할 수 없으므로 파일을 새로 쓴다
     Store.writeBlocks(blockchain);
@@ -366,6 +370,9 @@ const addBlockToChain = candidateBlock => {
       console.log("Couldnt process txs");
       return false;
     }else{
+        // 주소 색인은 이 블록 이전의 UTxOut 으로 입력을 되짚어야 하므로
+        // uTxOuts 를 갈아 끼우기 전에 먼저 갱신한다.
+        AddressIndex.applyBlock(candidateBlock, uTxOuts);
         blockchain.push(candidateBlock);
         uTxOuts = processedTxs;
         updateMempool(uTxOuts);
@@ -444,6 +451,7 @@ const initChain = (dataDir) => {
 
   blockchain = chain;
   uTxOuts = utxos;
+  rebuildAddressIndex();
 
   // 중간에 잘렸다면 파일도 맞춰 준다
   if (chain.length !== persisted.length) {
@@ -453,15 +461,22 @@ const initChain = (dataDir) => {
   return { restored: chain.length, height: chain[chain.length - 1].index };
 };
 
+// 색인은 체인을 처음부터 재생해야 만들 수 있다.
+const rebuildAddressIndex = () => {
+  AddressIndex.rebuild(blockchain, (block, before) =>
+    processTxs(block.data, before, block.index)
+  );
+};
+
 // TxOutList 가져오기
 const getUTxOutList = () => _.cloneDeep(uTxOuts);
 
 // 지갑 정보 가져오기
-const getAccountBalance = () => getBalance(getPublicFromWallet(), uTxOuts);
+const getAccountBalance = () => getWalletBalance(uTxOuts);
 
 // 보내는 트렌젝션
 const sendTx = (address, amount, fee = 0) => {
-  const tx = createTx(address, amount, getPrivateFromWallet(), getUTxOutList(), getMempool(), fee);
+  const tx = createTx(address, amount, getUTxOutList(), getMempool(), fee);
   addToMempool(tx, getUTxOutList());
   require("./p2p").broadcastMempool();
   return tx;
@@ -474,6 +489,7 @@ const handleIncomingTx = (tx) => {
 module.exports = {
   replaceChain,
   initChain,
+  rebuildAddressIndex,
   getTxProof,
   calculateNewDifficulty,
   addBlockToChain,
