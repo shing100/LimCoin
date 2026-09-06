@@ -12,7 +12,8 @@ const CryptoJS = require("crypto-js");
 
 const {
   getTxId, validateTx, processTxs, createCoinbaseTx,
-  getBlockSubsidy, getTxFee, HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK
+  getBlockSubsidy, getTotalSupply, getTxFee, HALVING_INTERVAL, INITIAL_SUBSIDY,
+  MAX_TXS_PER_BLOCK
 } = require("../src/transactions");
 const { getMerkleRoot, getMerkleProof, verifyMerkleProof } = require("../src/merkle");
 const { selectTxsForBlock } = require("../src/memPool");
@@ -164,6 +165,30 @@ test("총 발행량에 상한이 있다", () => {
   assert.ok(supply > 0);
   assert.ok(supply <= 2 * INITIAL_SUBSIDY * HALVING_INTERVAL);
   assert.ok(supply / COIN < 4_200_001, `총 발행량 ${formatLim(supply)} LIM`);
+});
+
+test("getTotalSupply 는 블록마다 더한 것과 같다", () => {
+  /*
+   * /info 가 4초마다 불리는 자리라 체인을 훑지 않고 구간별로 계산한다.
+   * 결과가 하나라도 어긋나면 발행량 표시가 틀어진다.
+   */
+  const bruteForce = height => {
+    let total = 0;
+    for (let i = 0; i <= height; i++) {
+      total += getBlockSubsidy(i);
+    }
+    return total;
+  };
+
+  for (const height of [0, 1, 9, 1000, HALVING_INTERVAL - 1, HALVING_INTERVAL, HALVING_INTERVAL + 1]) {
+    assert.strictEqual(getTotalSupply(height), bruteForce(height), `높이 ${height}`);
+  }
+});
+
+test("총 발행량은 반감이 거듭돼도 상한을 넘지 않는다", () => {
+  const cap = getTotalSupply(HALVING_INTERVAL * 200);
+  assert.strictEqual(getTotalSupply(HALVING_INTERVAL * 1000), cap, "더 가도 늘지 않는다");
+  assert.ok(cap / COIN < 4_200_001, `총 발행량 ${formatLim(cap)} LIM`);
 });
 
 /* --------------------------------- 7장/8장: 머클 트리와 SPV 증명 */

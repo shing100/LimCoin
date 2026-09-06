@@ -28,6 +28,28 @@ const MAX_TXS_PER_BLOCK = 100;
 
 // 해당 높이의 블록 보조금. 반감이 거듭되면 0 으로 수렴하고,
 // 그 뒤로는 백서대로 수수료만 남는다.
+/*
+ * 높이 height 까지 발행된 총량.
+ *
+ * 예전에는 /info 가 블록마다 getBlockSubsidy 를 불러 더했다. 체인이
+ * 길어질수록 폴링 한 번의 값이 비례해서 커진다. 반감기마다 보조금이
+ * 같으므로 구간별로 곱하면 반감 횟수(최대 64번)만큼만 돌면 된다.
+ */
+const getTotalSupply = height => {
+  let total = 0;
+  let remaining = height + 1; // 블록 수 (제네시스 포함)
+  for (let epoch = 0; remaining > 0 && epoch < 64; epoch++) {
+    const subsidy = getBlockSubsidy(epoch * HALVING_INTERVAL);
+    if (subsidy === 0) {
+      break;
+    }
+    const count = Math.min(remaining, HALVING_INTERVAL);
+    total += subsidy * count;
+    remaining -= count;
+  }
+  return total;
+};
+
 const getBlockSubsidy = blockIndex => {
   const halvings = Math.floor(blockIndex / HALVING_INTERVAL);
   if (halvings >= 64) {
@@ -508,6 +530,7 @@ module.exports = {
   getPublicKey,
   isAddressValid,
   getBlockSubsidy,
+  getTotalSupply,
   getTxFee,
   HALVING_INTERVAL,
   INITIAL_SUBSIDY,

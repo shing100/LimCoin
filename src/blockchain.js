@@ -4,6 +4,7 @@ const Wallet = require("./wallet"),
   Merkle = require("./merkle"),
   Store = require("./store"),
   AddressIndex = require("./addressIndex"),
+  ChainIndex = require("./chainIndex"),
   PoW = require("./pow"),
   { Worker } = require("worker_threads"),
   os = require("os"),
@@ -80,6 +81,7 @@ let blockchain = [genesisBlock];
 
 let uTxOuts = processTxs(blockchain[0].data, [], 0);
 AddressIndex.applyBlock(genesisBlock, []);
+ChainIndex.applyBlock(genesisBlock);
 
 /*
  * 블록마다 "이 블록이 걷어 낸 UTxOut" 을 적어 둔다 (undo 데이터).
@@ -524,6 +526,7 @@ const replaceChain = candidateChain => {
      */
     const droppedFrom =
       validated.common < blockchain.length ? blockchain[validated.common].index : null;
+    const dropped = blockchain.slice(validated.common);
 
     blockchain = validated.chain;
     uTxOuts = validated.uTxOuts;
@@ -531,10 +534,12 @@ const replaceChain = candidateChain => {
 
     if (droppedFrom !== null) {
       AddressIndex.rollbackTo(droppedFrom);
+      ChainIndex.rollbackBlocks(dropped);
     }
     let indexed = validated.uTxOutsAtCommon;
     for (let i = validated.common; i < blockchain.length; i++) {
       AddressIndex.applyBlock(blockchain[i], indexed);
+      ChainIndex.applyBlock(blockchain[i]);
       // 서명 검증은 isChainValid 에서 끝났으므로 여기서는 반영만 한다
       indexed = updateUTxOuts(blockchain[i].data, indexed);
     }
@@ -607,6 +612,7 @@ const addBlockToChain = candidateBlock => {
         // 주소 색인은 이 블록 이전의 UTxOut 으로 입력을 되짚어야 하므로
         // uTxOuts 를 갈아 끼우기 전에 먼저 갱신한다.
         AddressIndex.applyBlock(candidateBlock, uTxOuts);
+        ChainIndex.applyBlock(candidateBlock);
         blockchain.push(candidateBlock);
         undoLog.push(collectConsumed(candidateBlock.data, uTxOuts));
         uTxOuts = processedTxs;
@@ -626,19 +632,48 @@ const addBlockToChain = candidateBlock => {
  * 머클 증명을 내준다. 검증하는 쪽은 헤더의 merkleRoot 만 있으면 된다.
  */
 const getTxProof = txId => {
-  for (const block of blockchain) {
-    const proof = getMerkleProof(block.data, txId);
-    if (proof !== null) {
-      return {
-        txId,
-        blockIndex: block.index,
-        blockHash: block.hash,
-        merkleRoot: block.merkleRoot,
-        proof
-      };
+  // 예전에는 찾을 때까지 블록마다 머클 트리를 새로 쌓았다.
+  // 색인이 어느 블록인지 알려 주므로 그 블록 하나만 쌓으면 된다.
+  const block = getBlockByHeight(ChainIndex.findTxHeight(txId));
+  if (block === undefined) {
+    return null;
+  }
+  const proof = getMerkleProof(block.data, txId);
+  if (proof === null) {
+    return null;
+  }
+  return {
+    txId,
+    blockIndex: block.index,
+    blockHash: block.hash,
+    merkleRoot: block.merkleRoot,
+    proof
+  };
+};
+
+const getBlockByHeight = height =>
+  height === undefined ? undefined : blockchain[height];
+
+// 블록 해시로 블록 찾기. 예전에는 체인을 훑었다.
+const getBlockByHash = hash => getBlockByHeight(ChainIndex.findBlockHeight(hash));
+
+/**
+ * 트랜잭션 id 로 찾기.
+ *
+ * 블록에 담긴 것이면 담긴 블록을 함께 준다. 아직 담기지 않았으면
+ * mempool 에서 찾는다 — 익스플로러가 "대기 중"인 트랜잭션도 열어 볼 수
+ * 있어야 한다. 예전에는 체인에 없으면 그냥 404 였다.
+ */
+const findTx = txId => {
+  const block = getBlockByHeight(ChainIndex.findTxHeight(txId));
+  if (block !== undefined) {
+    const tx = block.data.find(candidate => candidate.id === txId);
+    if (tx !== undefined) {
+      return { tx, block, pending: false };
     }
   }
-  return null;
+  const pending = getMempool().find(candidate => candidate.id === txId);
+  return pending === undefined ? null : { tx: pending, block: null, pending: true };
 };
 
 /**
@@ -692,7 +727,7 @@ const initChain = (dataDir) => {
   blockchain = chain;
   uTxOuts = utxos;
   undoLog = undo;
-  rebuildAddressIndex();
+  rebuildIndexes();
 
   // 중간에 잘렸다면 파일도 맞춰 준다
   if (chain.length !== persisted.length) {
@@ -703,10 +738,11 @@ const initChain = (dataDir) => {
 };
 
 // 색인은 체인을 처음부터 재생해야 만들 수 있다.
-const rebuildAddressIndex = () => {
+const rebuildIndexes = () => {
   AddressIndex.rebuild(blockchain, (block, before) =>
     processTxs(block.data, before, block.index)
   );
+  ChainIndex.rebuild(blockchain);
 };
 
 // TxOutList 가져오기
@@ -758,8 +794,11 @@ module.exports = {
   countCommonPrefix,
   stopMiners,
   initChain,
-  rebuildAddressIndex,
+  rebuildIndexes,
   getTxProof,
+  getBlockByHash,
+  getBlockByHeight,
+  findTx,
   calculateNewDifficulty,
   difficultyForNext,
   isBlockValid,

@@ -96,6 +96,7 @@ test("한 블록 안에서 만들어졌다 쓰인 출력은 되감아도 되살�
 
 const Blockchain = require("../src/blockchain");
 const AddressIndex = require("../src/addressIndex");
+const ChainIndex = require("../src/chainIndex");
 const genesis = require("../src/genesis.json");
 
 const { getBlockChain, addBlockToChain, replaceChain, getUTxOutList, difficultyForNext } = Blockchain;
@@ -145,6 +146,8 @@ test("갈라진 체인으로 갈아 끼워도 UTxOut 과 주소 색인이 재생
 
   assert.strictEqual(getBlockChain().length, 4);
   assert.ok(AddressIndex.hasAddress(a2Address), "A2 채굴자가 색인에 있어야 한다");
+  assert.strictEqual(ChainIndex.findBlockHeight(a2.hash), 2);
+  assert.strictEqual(ChainIndex.findTxHeight(a3.data[0].id), 3);
 
   // 상대 체인: genesis - A1 - B2 - B3 - B4 (A1 까지는 같다)
   const b2Address = newAddress();
@@ -171,6 +174,15 @@ test("갈라진 체인으로 갈아 끼워도 UTxOut 과 주소 색인이 재생
   assert.strictEqual(AddressIndex.hasAddress(a1Address), true, "공통 접두사는 남는다");
   assert.strictEqual(AddressIndex.hasAddress(a2Address), false, "밀려난 A2 는 사라진다");
   assert.strictEqual(AddressIndex.hasAddress(a3Address), false, "밀려난 A3 은 사라진다");
+  // 조회 색인도 밀려난 블록을 잊고 새 블록을 알아야 한다
+  assert.strictEqual(ChainIndex.findBlockHeight(a2.hash), undefined);
+  assert.strictEqual(ChainIndex.findTxHeight(a3.data[0].id), undefined);
+  assert.strictEqual(ChainIndex.findBlockHeight(b4.hash), 4);
+  assert.strictEqual(ChainIndex.findTxHeight(b2.data[0].id), 2);
+  assert.strictEqual(ChainIndex.getIndexedTxCount(), 5, "제네시스 + 새 블록 4개");
+  assert.strictEqual(Blockchain.getBlockByHash(b3.hash).index, 3);
+  assert.strictEqual(Blockchain.findTx(b3.data[0].id).pending, false);
+
   for (const address of [b2Address, b3Address, b4Address]) {
     assert.strictEqual(AddressIndex.hasAddress(address), true);
     const { transactions } = AddressIndex.getTransactions(address);

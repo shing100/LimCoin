@@ -9,17 +9,23 @@ const express = require("express"),
     Transactions = require("./transactions"),
     Miner = require("./miner"),
     AddressIndex = require("./addressIndex"),
-    crypto = require("crypto"),
-    _ = require("lodash");
+    ChainIndex = require("./chainIndex"),
+    crypto = require("crypto");
 
-const { getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList, getTxProof, getNewestBlock, initChain } = Blockchain;
+const {
+  getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList,
+  getTxProof, getNewestBlock, initChain, getBlockByHash, findTx
+} = Blockchain;
 const { getTxFee } = Transactions;
 const { indexByOutpoint, indexByAddress } = require("./utxo");
 const { startP2PServer, connectToPeers, getPeers } = P2P;
 const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance, getMnemonic, restoreFromMnemonic, GAP_LIMIT } = Wallet;
 const AddressIndexApi = require("./addressIndex");
 const { getMempool } = Mempool;
-const { isAddressValid, getBlockSubsidy, HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK } = Transactions;
+const {
+  isAddressValid, getBlockSubsidy, getTotalSupply,
+  HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK
+} = Transactions;
 const { COIN, DECIMALS } = require("./units");
 
 const PORT = process.env.HTTP_PORT || 3000;
@@ -230,21 +236,36 @@ app.post("/me/restore", requireWalletAuth, (req, res) => {
 
 app.get("/blocks/:hash", (req, res) => {
   const { params : { hash } } = req;
-  const block = _.find(getBlockChain(), { hash });
+  const block = getBlockByHash(hash);
   if(block === undefined){
-    res.status(400).send("Block not found")
+    res.status(404).send("Block not found")
   }else{
     res.send(block);
   }
 });
 
+/*
+ * 트랜잭션 하나.
+ *
+ * 아직 블록에 담기지 않은 것(mempool)도 찾아 준다. 보낸 직후에 열어 볼 수
+ * 있어야 하기 때문이다 — 예전에는 체인에 없으면 그냥 "찾을 수 없음"이었다.
+ * 담긴 블록이 있으면 높이와 확인 수를 함께 준다.
+ */
 app.get("/transactions/:id", (req, res) => {
-  const tx = _(getBlockChain()).map(blocks => blocks.data).flatten().find({ id: req.params.id });
-  if(tx === undefined){
-    res.status(400).send("Tx not found")
-  }else{
-    res.send(tx);
+  const found = findTx(req.params.id);
+  if(found === null){
+    res.status(404).send("Tx not found")
+    return;
   }
+  const { tx, block, pending } = found;
+  res.send({
+    ...tx,
+    pending,
+    blockIndex: pending ? null : block.index,
+    blockHash: pending ? null : block.hash,
+    timestamp: pending ? null : block.timestamp,
+    confirmations: pending ? 0 : getNewestBlock().index - block.index + 1
+  });
 });
 
 app.route("/transactions")
@@ -330,15 +351,15 @@ app.get("/search/:query", (req, res) => {
     return;
   }
 
-  const block = _.find(getBlockChain(), { hash: query });
+  // 색인 조회. 예전에는 블록을, 그다음 트랜잭션 전체를 훑었다.
+  const block = getBlockByHash(query);
   if (block !== undefined) {
     res.send({ type: "block", hash: block.hash });
     return;
   }
 
-  const tx = _(getBlockChain()).map(b => b.data).flatten().find({ id: query });
-  if (tx !== undefined) {
-    res.send({ type: "tx", id: tx.id });
+  if (findTx(query) !== null) {
+    res.send({ type: "tx", id: query });
     return;
   }
 
@@ -347,7 +368,6 @@ app.get("/search/:query", (req, res) => {
 
 // 화폐 정책과 체인 상태
 app.get("/info", (req, res) => {
-  const chain = getBlockChain();
   const newest = getNewestBlock();
   const nextIndex = newest.index + 1;
 
@@ -365,13 +385,13 @@ app.get("/info", (req, res) => {
     0
   );
 
-  let txCount = 0;
-  let supply = 0;
-  for (const block of chain) {
-    const txs = block.data || [];
-    txCount += txs.length;
-    supply += getBlockSubsidy(block.index);
-  }
+  /*
+   * 예전에는 체인을 통째로 훑어 트랜잭션 수와 발행량을 셌다. 4초마다
+   * 부르는 자리에서 체인 길이에 비례하는 값을 낼 이유가 없다.
+   * 트랜잭션 수는 색인이 이미 알고, 발행량은 반감기 구간별로 계산한다.
+   */
+  const txCount = ChainIndex.getIndexedTxCount();
+  const supply = getTotalSupply(newest.index);
 
   res.send({
     height: newest.index,
