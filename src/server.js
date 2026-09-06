@@ -42,14 +42,30 @@ const app = express();
 app.use(bodyParser.json({ limit: "1mb" }));
 app.use(morgan("combined"));
 
-// 읽기 전용 엔드포인트만 교차 출처를 허용한다
 // X-Total-Count 는 단순 응답 헤더가 아니라서, 명시적으로 노출하지 않으면
 // 교차 출처에서 읽을 수 없다. 익스플로러의 페이지네이션이 이 값에 기댄다.
-const publicCors = cors({ exposedHeaders: ["X-Total-Count"] });
+const allowCors = cors({ exposedHeaders: ["X-Total-Count"] });
 const readOnly = ["/blocks", "/transactions", "/peers", "/address", "/info", "/search"];
+
 app.use((req, res, next) => {
+  // 읽기 전용은 누구에게나 연다. 익스플로러가 붙어야 한다.
   if (readOnly.some(prefix => req.path.startsWith(prefix)) && req.method === "GET") {
-    return publicCors(req, res, next);
+    return allowCors(req, res, next);
+  }
+
+  /*
+   * 지갑 엔드포인트의 교차 출처는 토큰이 켜져 있을 때만 허용한다.
+   *
+   * 지갑 UI 는 노드와 다른 출처에서 뜬다 — 개발 중에는 React 개발서버가,
+   * Electron 에서는 노드가 임의 포트를 쓴다. 무조건 막으면 정작 지갑이
+   * 자기 노드에 붙지 못한다.
+   *
+   * 진짜 방어선은 토큰이다. 남의 웹페이지는 토큰을 알 수 없으므로 요청이
+   * 가더라도 401 로 막힌다. 반대로 인증을 꺼 둔 상태(none)에서 교차 출처를
+   * 열어 주면 아무 웹페이지나 이 노드를 조작할 수 있으니, 그때는 막는다.
+   */
+  if (!AUTH_DISABLED) {
+    return allowCors(req, res, next);
   }
   next();
 });
