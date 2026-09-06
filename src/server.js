@@ -14,6 +14,7 @@ const express = require("express"),
 
 const { getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList, getTxProof, getNewestBlock, initChain } = Blockchain;
 const { getTxFee } = Transactions;
+const { indexByOutpoint, indexByAddress } = require("./utxo");
 const { startP2PServer, connectToPeers, getPeers } = P2P;
 const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance, getMnemonic, restoreFromMnemonic, GAP_LIMIT } = Wallet;
 const AddressIndexApi = require("./addressIndex");
@@ -171,11 +172,13 @@ app.get("/me/address", requireWalletAuth, (req,res) => {
  * 갖게 된다. "내 주소"가 하나뿐이라는 전제가 더는 성립하지 않는다.
  */
 app.get("/me/addresses", requireWalletAuth, (req, res) => {
-  const uTxOuts = getUTxOutList();
+  // 주소마다 UTxOut 전체를 훑으면 주소 수 x UTxOut 수다.
+  // 색인을 한 번만 만들면 한 번 훑는 것으로 끝난다.
+  const balances = indexByAddress(getUTxOutList());
   res.send(
     getAddresses().map(address => ({
       address,
-      balance: getBalance(address, uTxOuts)
+      balance: balances.get(address) || 0
     }))
   );
 });
@@ -351,9 +354,14 @@ app.get("/info", (req, res) => {
   // 익스플로러가 통계를 내려고 체인 전체를 받지 않아도 되게 여기서 계산한다.
   // 수수료는 이미 유통 중이던 코인이 옮겨 간 것이라 발행량이 아니다.
   const mempool = getMempool();
-  const uTxOuts = getUTxOutList();
+  /*
+   * getTxFee 는 배열을 받으면 입력마다 그 배열을 훑는다. mempool 500건에
+   * UTxOut 2만 개면 폴링 한 번에 천만 번 비교다. 지갑과 익스플로러가
+   * 4초마다 부르는 자리라 색인을 한 번만 만들어 돌려 쓴다.
+   */
+  const unspent = indexByOutpoint(getUTxOutList());
   const mempoolFees = mempool.reduce(
-    (sum, tx) => sum + Math.max(0, getTxFee(tx, uTxOuts)),
+    (sum, tx) => sum + Math.max(0, getTxFee(tx, unspent)),
     0
   );
 

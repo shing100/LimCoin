@@ -1,5 +1,4 @@
-const _ = require("lodash"),
-  Wallet = require("./wallet"),
+const Wallet = require("./wallet"),
   Mempool = require("./memPool"),
   Transactions = require("./transactions"),
   Merkle = require("./merkle"),
@@ -17,9 +16,18 @@ const { getMerkleRoot, getMerkleProof } = Merkle;
 
 const { getWalletBalance, getPublicFromWallet, createTx } = Wallet;
 
-const { createCoinbaseTx, processTxs, updateUTxOuts, getTxFee, MAX_TXS_PER_BLOCK } = Transactions;
+const {
+  createCoinbaseTx,
+  processTxs,
+  updateUTxOuts,
+  collectConsumed,
+  rollbackTxs,
+  getTxFee,
+  MAX_TXS_PER_BLOCK
+} = Transactions;
 
 const { addToMempool, getMempool, updateMempool, selectTxsForBlock } = Mempool;
+const { indexByOutpoint } = require("./utxo");
 
 const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기
 const DIFFICULTY_ADJUSMENT_INTERVAL = 10; // 난이도 조정 주기
@@ -73,6 +81,13 @@ let blockchain = [genesisBlock];
 let uTxOuts = processTxs(blockchain[0].data, [], 0);
 AddressIndex.applyBlock(genesisBlock, []);
 
+/*
+ * 블록마다 "이 블록이 걷어 낸 UTxOut" 을 적어 둔다 (undo 데이터).
+ * blockchain 과 자리가 1:1 로 맞아야 한다. 체인 교체 때 갈라진 지점까지만
+ * 되감는 데 쓴다 — transactions.js 의 collectConsumed 주석 참고.
+ */
+let undoLog = [collectConsumed(genesisBlock.data, [])];
+
 // 새로운 블록 가져오기
 const getNewestBlock = () => blockchain[blockchain.length - 1];
 
@@ -95,8 +110,10 @@ const createNewBlock = async () => {
     snapshot,
     MAX_TXS_PER_BLOCK - 1
   );
+  // getTxFee 는 배열을 받으면 입력마다 훑는다. 색인을 한 번만 만든다.
+  const unspent = indexByOutpoint(snapshot);
   const totalFees = selected.reduce(
-    (sum, tx) => sum + getTxFee(tx, snapshot),
+    (sum, tx) => sum + getTxFee(tx, unspent),
     0
   );
 
@@ -156,14 +173,23 @@ const createNewRawBlock = async data => {
 }
 
 // 블록 난이도 찾기 와 조정
-const findDifficulty = () => {
-  const newestBlock = getNewestBlock();
+/*
+ * chain 다음에 올 블록이 가져야 하는 난이도.
+ *
+ * 예전에는 우리 체인만 볼 수 있었다(findDifficulty). 그래서 남이 보낸
+ * 후보 체인의 블록은 난이도를 스스로 정해도 아무도 따지지 않았다.
+ * 검증하는 쪽은 그 체인의 앞부분을 기준으로 계산해야 한다.
+ */
+const difficultyForNext = chain => {
+  const newestBlock = chain[chain.length - 1];
   if(newestBlock.index % DIFFICULTY_ADJUSMENT_INTERVAL === 0 && newestBlock.index !== 0) {
-    return calculateNewDifficulty(newestBlock, getBlockChain());
+    return calculateNewDifficulty(newestBlock, chain);
   }else{
     return newestBlock.difficulty;
   }
 }
+
+const findDifficulty = () => difficultyForNext(getBlockChain());
 
 // 난이도 계산기
 const calculateNewDifficulty = (newestBlock, blockchain) => {
@@ -309,9 +335,33 @@ const getBlockHash = block => createHash(block.index, block.previousHash, block.
 // genesis Block 초기 hash 값 넣기
 //console.log(createHash(genesisBlock));
 // 블록 유효성 체크하기
-const isBlockValid = (candidateBlock, latestBlock) => {
+/*
+ * 블록 유효성.
+ *
+ * expectedDifficulty 는 이 높이에서 프로토콜이 요구하는 난이도다.
+ * 두 가지를 함께 봐야 작업증명이 성립한다.
+ *
+ *   1. 블록이 내건 난이도가 프로토콜이 정한 값과 같은가
+ *   2. 해시가 실제로 그 난이도를 만족하는가
+ *
+ * 둘 다 없으면 난이도는 그냥 블록에 적힌 숫자일 뿐이다. 예전에는 해시가
+ * 헤더와 맞는지만 봤기 때문에, 0 을 하나도 못 맞춘 해시로도 블록을 만들 수
+ * 있었고 difficulty 에 큰 수를 적어 두면 sumDifficulty(2^difficulty) 가
+ * 정직한 체인을 단번에 넘어섰다. 일 한 번 안 하고 체인을 갈아 끼울 수 있는
+ * 셈이다.
+ */
+const isBlockValid = (candidateBlock, latestBlock, expectedDifficulty) => {
   if(!isBlockStructureValid(candidateBlock)){
     console.log('The candidate block structure is not valid');
+    return false;
+  }else if(typeof candidateBlock.difficulty !== 'number' || candidateBlock.difficulty < MIN_DIFFICULTY){
+    console.log('The block difficulty is not valid');
+    return false;
+  }else if(expectedDifficulty !== undefined && candidateBlock.difficulty !== expectedDifficulty){
+    console.log(`The block difficulty ${candidateBlock.difficulty} is not the expected ${expectedDifficulty}`);
+    return false;
+  }else if(!PoW.hashMatchesDifficulty(candidateBlock.hash, candidateBlock.difficulty)){
+    console.log('The block hash does not meet the claimed difficulty');
     return false;
   }else if(latestBlock.index + 1 !== candidateBlock.index){
     console.log('The block doesnt have a valid index')
@@ -360,14 +410,38 @@ const countCommonPrefix = (a, b) => {
 };
 
 /**
+ * 우리 체인을 common 번째 블록 직전 상태까지 되감은 UTxOut 집합.
+ *
+ * undo 데이터가 체인과 어긋나 있으면 null. 부르는 쪽이 예전처럼
+ * 제네시스부터 재생하도록 한다 — 잘못된 UTxOut 집합을 들고 가느니
+ * 느리게 가는 편이 낫다.
+ */
+const rewindTo = common => {
+  if (undoLog.length !== blockchain.length) {
+    console.log("undo 데이터가 체인과 어긋났습니다. 제네시스부터 다시 재생합니다.");
+    return null;
+  }
+  let working = uTxOuts;
+  for (let i = blockchain.length - 1; i >= common; i--) {
+    working = rollbackTxs(blockchain[i].data, working, undoLog[i]);
+  }
+  return working;
+};
+
+/**
  * 후보 체인을 검증한다.
  *
- * 통과하면 { chain, uTxOuts } 를, 아니면 null 을 돌려준다.
+ * 통과하면 { chain, uTxOuts, undo, common, uTxOutsAtCommon } 을,
+ * 아니면 null 을 돌려준다.
  *
  * 우리 체인과 앞부분이 같으면 그 블록들은 이미 검증해 둔 것이다. 해시가
  * 같으면 헤더가 같고, 헤더는 머클 루트를, 머클 루트는 트랜잭션 id 를,
  * 트랜잭션 id 는 그 내용을 덮는다. 그러니 겹치는 만큼은 서명 검증을
- * 건너뛰고 UTxOut 재생만 한다 — reorg 비용을 결정하는 것은 서명 검증이다.
+ * 건너뛴다 — reorg 비용을 결정하는 것은 서명 검증이다.
+ *
+ * 나아가 겹치는 부분은 재생조차 하지 않는다. 우리 UTxOut 집합에서
+ * 갈라진 블록들만 undo 데이터로 되감으면 그게 곧 공통 지점의 상태다.
+ * 예전에는 서명 검증만 건너뛰고 재생은 제네시스부터 다시 했다.
  *
  * 다만 돌려주는 chain 의 앞부분은 *우리* 블록으로 채운다. 트랜잭션 id 는
  * 서명을 덮지 않으므로, 해시가 같으면서 서명 바이트만 다른 블록을 보낼 수
@@ -394,28 +468,37 @@ const isChainValid = (candidateChain) => {
 
     const common = countCommonPrefix(blockchain, candidateChain);
     const chain = blockchain.slice(0, common);
-    let foreignUTxOuts = [];
+    const undo = undoLog.slice(0, common);
 
-    for(let i=0; i<candidateChain.length; i++){
-      if (i < common) {
-        // 이미 검증한 블록. 서명 검증 없이 UTxOut 만 재생한다.
-        foreignUTxOuts = updateUTxOuts(chain[i].data, foreignUTxOuts);
-        continue;
+    let working = rewindTo(common);
+    if (working === null) {
+      working = [];
+      for (let i = 0; i < common; i++) {
+        undo[i] = collectConsumed(chain[i].data, working);
+        working = updateUTxOuts(chain[i].data, working);
       }
+    }
+    // 주소 색인을 갈라진 지점부터 다시 쌓을 때 시작점이 된다
+    const uTxOutsAtCommon = working;
 
+    for(let i = common; i < candidateChain.length; i++){
       const currentBlock = candidateChain[i];
-      if(i !== 0 && !isBlockValid(currentBlock, candidateChain[i-1])){
+      if(i !== 0 && !isBlockValid(currentBlock, candidateChain[i-1], difficultyForNext(chain))){
         return null;
       }
 
-      foreignUTxOuts = processTxs(currentBlock.data, foreignUTxOuts, currentBlock.index);
+      // 재생하기 전의 집합에서 뽑아야 블록 안에서 만들어졌다 쓰인 출력이 빠진다
+      const consumed = collectConsumed(currentBlock.data, working);
+      const processed = processTxs(currentBlock.data, working, currentBlock.index);
 
-      if(foreignUTxOuts === null){
+      if(processed === null){
         return null;
       }
+      working = processed;
+      undo.push(consumed);
       chain.push(currentBlock);
     };
-    return { chain, uTxOuts: foreignUTxOuts };
+    return { chain, uTxOuts: working, undo, common, uTxOutsAtCommon };
 };
 // 난이도 구분하기
 const sumDifficulty = anyBlockchain =>
@@ -434,10 +517,28 @@ const replaceChain = candidateChain => {
     // 예전에는 그대로 사라져 버렸다.
     const orphaned = collectOrphanedTxs(blockchain, validated.chain);
 
+    /*
+     * 주소 색인도 갈라진 지점까지만 되감고 새 블록만 얹는다.
+     * 예전에는 체인 전체를 다시 색인했다 — 한두 블록 갈라지자고
+     * 만 블록을 다시 훑는 셈이었다.
+     */
+    const droppedFrom =
+      validated.common < blockchain.length ? blockchain[validated.common].index : null;
+
     blockchain = validated.chain;
     uTxOuts = validated.uTxOuts;
-    // 밀려난 블록의 기록이 남으면 안 되므로 통째로 다시 만든다
-    rebuildAddressIndex();
+    undoLog = validated.undo;
+
+    if (droppedFrom !== null) {
+      AddressIndex.rollbackTo(droppedFrom);
+    }
+    let indexed = validated.uTxOutsAtCommon;
+    for (let i = validated.common; i < blockchain.length; i++) {
+      AddressIndex.applyBlock(blockchain[i], indexed);
+      // 서명 검증은 isChainValid 에서 끝났으므로 여기서는 반영만 한다
+      indexed = updateUTxOuts(blockchain[i].data, indexed);
+    }
+
     updateMempool(uTxOuts);
     // 체인 교체는 append 로 표현할 수 없으므로 파일을 새로 쓴다
     Store.writeBlocks(blockchain);
@@ -493,7 +594,7 @@ const reinstateTxs = txs => {
 
 // 블록 체인 더하기
 const addBlockToChain = candidateBlock => {
-  if(isBlockValid(candidateBlock, getNewestBlock())){
+  if(isBlockValid(candidateBlock, getNewestBlock(), findDifficulty())){
     const processedTxs = processTxs(
       candidateBlock.data,
       uTxOuts,
@@ -507,6 +608,7 @@ const addBlockToChain = candidateBlock => {
         // uTxOuts 를 갈아 끼우기 전에 먼저 갱신한다.
         AddressIndex.applyBlock(candidateBlock, uTxOuts);
         blockchain.push(candidateBlock);
+        undoLog.push(collectConsumed(candidateBlock.data, uTxOuts));
         uTxOuts = processedTxs;
         updateMempool(uTxOuts);
         Store.appendBlock(candidateBlock);
@@ -568,11 +670,12 @@ const initChain = (dataDir) => {
   }
 
   let chain = [persisted[0]];
+  let undo = [collectConsumed(persisted[0].data, [])];
   let utxos = processTxs(persisted[0].data, [], 0);
 
   for (let i = 1; i < persisted.length; i++) {
     const block = persisted[i];
-    if (!isBlockValid(block, chain[chain.length - 1])) {
+    if (!isBlockValid(block, chain[chain.length - 1], difficultyForNext(chain))) {
       console.log(`저장된 블록 #${block.index} 이 유효하지 않습니다. 여기까지만 복원합니다.`);
       break;
     }
@@ -582,11 +685,13 @@ const initChain = (dataDir) => {
       break;
     }
     chain.push(block);
+    undo.push(collectConsumed(block.data, utxos));
     utxos = processed;
   }
 
   blockchain = chain;
   uTxOuts = utxos;
+  undoLog = undo;
   rebuildAddressIndex();
 
   // 중간에 잘렸다면 파일도 맞춰 준다
@@ -605,7 +710,18 @@ const rebuildAddressIndex = () => {
 };
 
 // TxOutList 가져오기
-const getUTxOutList = () => _.cloneDeep(uTxOuts);
+/*
+ * UTxOut 집합의 사본.
+ *
+ * 얕은 복사다. UTxOut 은 만들어진 뒤로는 아무도 고치지 않는다 —
+ * 쓰이면 목록에서 빠질 뿐이다. 그러니 배열만 새로 만들어 주면
+ * 밖에서 노드의 목록 자체를 건드리는 일은 막힌다.
+ *
+ * 예전에는 _.cloneDeep 이었다. UTxOut 2만 개 기준 한 번에 28.7ms 였고,
+ * /info 와 /address/:address 가 부를 때마다 그 값을 냈다. 얕은 복사는
+ * 0.12ms 다.
+ */
+const getUTxOutList = () => uTxOuts.slice();
 
 // 지갑 정보 가져오기
 const getAccountBalance = () => getWalletBalance(uTxOuts);
@@ -645,6 +761,8 @@ module.exports = {
   rebuildAddressIndex,
   getTxProof,
   calculateNewDifficulty,
+  difficultyForNext,
+  isBlockValid,
   addBlockToChain,
   isBlockStructureValid,
   getNewestBlock,

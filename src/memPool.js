@@ -1,5 +1,4 @@
-const _ = require("lodash"),
-  Transactions = require("./transactions");
+const Transactions = require("./transactions");
 
 const { validateTx, getTxFee, updateUTxOuts } = Transactions;
 const { keyOf, indexByOutpoint } = require("./utxo");
@@ -10,7 +9,18 @@ const MAX_MEMPOOL_SIZE = 500;
 
 let mempool = [];
 
-const getMempool = () => _.cloneDeep(mempool);
+/*
+ * mempool 사본.
+ *
+ * 얕은 복사다. 배열만 새로 만들고 트랜잭션 객체는 그대로 넘긴다.
+ * 트랜잭션은 서명이 끝난 순간부터 아무도 고치지 않는다(고치면 id 가
+ * 달라져 검증에서 떨어진다). 그러니 지켜야 할 것은 "밖에서 pool 에
+ * 넣거나 뺄 수 없다"는 것뿐이고, 그건 배열만 새로 만들면 된다.
+ *
+ * 예전에는 _.cloneDeep 이었다. /info 는 지갑과 익스플로러가 4초마다
+ * 부르는데, 500건짜리 mempool 을 통째로 복제하는 데 1.8ms 가 들었다.
+ */
+const getMempool = () => mempool.slice();
 
 // 지금 pool 이 쓰기로 예약한 outpoint 들
 const spentInPool = pool => {
