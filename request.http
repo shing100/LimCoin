@@ -1,29 +1,48 @@
-Send Request
-GET http://localhost:3000/blocks
+### VS Code REST Client 용 요청 모음
+### 서버: yarn dev (기본 포트 3000)
 
-POST http://localhost:3000/blocks
+@host = http://localhost:3000
+
+### 전체 블록체인
+GET {{host}}/blocks
+
+### 새 블록 채굴 (본문 없음 — 코인베이스 + mempool 을 담는다)
+POST {{host}}/blocks
+
+### 해시로 블록 조회
+GET {{host}}/blocks/블록해시를_여기에
+
+### 연결된 피어 목록
+GET {{host}}/peers
+
+### 피어 연결
+POST {{host}}/peers
 Content-Type: application/json
+
 {
-  "data":"Second block"
+  "peer": "ws://localhost:4002"
 }
 
+### 내 잔액
+GET {{host}}/me/balance
 
-POST http://localhost:3000/peers
+### 내 주소 (아래 송금 예제에 붙여 넣을 것)
+GET {{host}}/me/address
+
+### 특정 주소 잔액
+GET {{host}}/address/받는사람_주소를_여기에
+
+### mempool (아직 블록에 담기지 않은 트랜잭션)
+GET {{host}}/transactions
+
+### 송금 — address 는 GET /me/address 로 받은 값으로 바꿀 것
+POST {{host}}/transactions
 Content-Type: application/json
+
 {
-  "peer": "ws://localhost:4000"
+  "address": "받는사람_주소를_여기에",
+  "amount": 10
 }
 
-
-GET http://localhost:3000/me/balance
-
-GET http://localhost:3000/me/address
-
-POST http://localhost:3000/transactions/
-Content-Type: application/json
-{
-    "address": "04fcb2d91c03d62594a43ab4bfd84cd9fb22d80033b833a059afc1c73ee98b8eb5926deeb54d4e1fb70aaa6d4a862a690b5f66f1afa62d0a5aea8775f59752846e",
-    "amount": 10
-}
-
-GET http://localhost:3000/transactions
+### id 로 트랜잭션 조회
+GET {{host}}/transactions/트랜잭션id를_여기에
