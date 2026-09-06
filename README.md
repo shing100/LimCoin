@@ -233,6 +233,7 @@ log₂(n) 개의 해시만 있으면 된다.
 | GET  | `/transactions/:id` | id 로 트랜잭션 조회 |
 | GET  | `/transactions/:id/proof` | 머클(SPV) 증명 |
 | GET  | `/info` | 화폐 정책, 체인 통계(높이/tx수/발행량), 채굴 상태 |
+| GET  | `/search/:query` | 검색어가 블록/트랜잭션/주소 중 무엇인지 판별 |
 
 🔒 = 지갑 토큰 필요
 | GET  | `/me/balance` | 내 잔액 🔒 |

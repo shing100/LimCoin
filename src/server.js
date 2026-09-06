@@ -43,8 +43,10 @@ app.use(bodyParser.json({ limit: "1mb" }));
 app.use(morgan("combined"));
 
 // 읽기 전용 엔드포인트만 교차 출처를 허용한다
-const publicCors = cors();
-const readOnly = ["/blocks", "/transactions", "/peers", "/address", "/info"];
+// X-Total-Count 는 단순 응답 헤더가 아니라서, 명시적으로 노출하지 않으면
+// 교차 출처에서 읽을 수 없다. 익스플로러의 페이지네이션이 이 값에 기댄다.
+const publicCors = cors({ exposedHeaders: ["X-Total-Count"] });
+const readOnly = ["/blocks", "/transactions", "/peers", "/address", "/info", "/search"];
 app.use((req, res, next) => {
   if (readOnly.some(prefix => req.path.startsWith(prefix)) && req.method === "GET") {
     return publicCors(req, res, next);
@@ -194,6 +196,54 @@ app.route("/mining")
     }
     res.send(Miner.getStatus());
   });
+
+/*
+ * 검색어가 무엇을 가리키는지 노드가 판별해 준다.
+ *
+ * 블록 해시와 트랜잭션 id 는 둘 다 64자 16진수라 겉모습으로 가릴 수 없다.
+ * 클라이언트가 블록을 먼저 찔러 보고 404 면 트랜잭션으로 넘어가는 식이면
+ * 정상 동작인데도 실패한 요청이 남는다. 노드는 둘 다 알고 있으므로
+ * 한 번에 답할 수 있다.
+ */
+app.get("/search/:query", (req, res) => {
+  const query = req.params.query;
+
+  if (/^\d+$/.test(query)) {
+    const chain = getBlockChain();
+    const height = Number(query);
+    const block = chain[height];
+    if (block === undefined) {
+      res.status(404).send(`높이 ${height} 인 블록이 없습니다 (0 ~ ${chain.length - 1})`);
+      return;
+    }
+    res.send({ type: "block", hash: block.hash });
+    return;
+  }
+
+  if (isAddressValid(query)) {
+    res.send({ type: "address", address: query });
+    return;
+  }
+
+  if (!/^[a-fA-F0-9]{64}$/.test(query)) {
+    res.status(400).send("블록 높이, 64자 해시, 또는 04 로 시작하는 주소를 입력하세요");
+    return;
+  }
+
+  const block = _.find(getBlockChain(), { hash: query });
+  if (block !== undefined) {
+    res.send({ type: "block", hash: block.hash });
+    return;
+  }
+
+  const tx = _(getBlockChain()).map(b => b.data).flatten().find({ id: query });
+  if (tx !== undefined) {
+    res.send({ type: "tx", id: tx.id });
+    return;
+  }
+
+  res.status(404).send("해당하는 블록이나 트랜잭션이 없습니다");
+});
 
 // 화폐 정책과 체인 상태
 app.get("/info", (req, res) => {
