@@ -2,7 +2,7 @@ const CryptoJS = require("crypto-js"),
   _ = require("lodash"),
   Wallet = require("./wallet"),
   Mempool = require("./memPool"),
-  Transactions = require("./Transactions"),
+  Transactions = require("./transactions"),
   hexToBinary = require("hex-to-binary");
 
 const { getBalance, getPublicFromWallet, createTx, getPrivateFromWallet  } = Wallet;
@@ -13,7 +13,8 @@ const { addToMempool, getMempool, updateMempool } = Mempool;
 
 const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기
 const DIFFICULTY_ADJUSMENT_INTERVAL = 10; // 난이도 조정 주기
-const TIMESTAMP_MINIT = 60; 
+const TIMESTAMP_MINIT = 60;
+const MIN_DIFFICULTY = 1; // 0 이면 어떤 해시든 통과해 버린다
 
 class Block{
   constructor(index, hash, previousHash, timestamp, data, difficulty, nonce){
@@ -27,26 +28,19 @@ class Block{
   }
 }
 
-// Genesis Tx 하드코딩 작업
-const genesisTx = {
-  txIns:[{signature: "",txOutId: "",txOutIndex: 0}],
-  txOuts:[
-    {
-      address: "04fcb2d91c03d62594a43ab4bfd84cd9fb22d80033b833a059afc1c73ee98b8eb5926deeb54d4e1fb70aaa6d4a862a690b5f66f1afa62d0a5aea8775f59752846e",
-      amount: 10
-    }
-  ],
-  id: "104ec1acfe866485a5f256e840ccaaa38d863fd83bdaaacf1d0937fa3b864435"
-};
+// 제네시스 블록은 genesis.json 에서 읽는다.
+// 새 체인을 띄우려면 `node scripts/generate-genesis.js` 로 다시 만들 것.
+// (하드코딩 시절 쓰던 주소는 개인키가 저장소에 함께 커밋되어 폐기되었다)
+const genesisData = require("./genesis.json");
 
 const genesisBlock = new Block(
-  0,
-  "29c40470cb988691014c979be3d6b1e35249e5b96651f97fc0d18e67db4ab513",
-  "",
-  1524382524,
-  [genesisTx],
-  15,
-  0
+  genesisData.index,
+  genesisData.hash,
+  genesisData.previousHash,
+  genesisData.timestamp,
+  genesisData.data,
+  genesisData.difficulty,
+  genesisData.nonce
 );
 
 // 블록체인
@@ -113,8 +107,8 @@ const calculateNewDifficulty = (newestBlock, blockchain) => {
   const timeTaken = newestBlock.timestamp - lastCalculatedBlock.timestamp;
   if(timeTaken < timeExpected/2){
     return lastCalculatedBlock.difficulty + 1;
-  }else if(timeTaken > timeExpected/2){
-    return lastCalculatedBlock.difficulty - 1;
+  }else if(timeTaken > timeExpected*2){
+    return Math.max(MIN_DIFFICULTY, lastCalculatedBlock.difficulty - 1);
   }else{
     return lastCalculatedBlock.difficulty;
   }
@@ -171,6 +165,7 @@ const isBlockValid = (candidateBlock, latestBlock) => {
     return false;
   }else if(!isTimeStampValid(candidateBlock, latestBlock)) {
     console.log("The timestamp of this block is invalid");
+    return false;
   }
   return true;
 };
@@ -188,6 +183,10 @@ const isBlockStructureValid = (block) => {
 
 // 블록체인 유효성 검사하기
 const isChainValid = (candidateChain) => {
+    if(!(candidateChain instanceof Array) || candidateChain.length === 0){
+      console.log('The candidate chain is empty');
+      return null;
+    }
     const isGenesisValid = block => {
       return JSON.stringify(block) === JSON.stringify(genesisBlock);
     };
@@ -199,8 +198,8 @@ const isChainValid = (candidateChain) => {
     let foreignUTxOuts = [];
 
     for(let i=0; i<candidateChain.length; i++){
-      const currentBlock = candidateBlock[i];
-      if(1 !== 0 && !isBlockValid(currentBlock, candidateChain[i-1])){
+      const currentBlock = candidateChain[i];
+      if(i !== 0 && !isBlockValid(currentBlock, candidateChain[i-1])){
         return null;
       }
 
@@ -217,7 +216,7 @@ const sumDifficulty = anyBlockchain =>
   anyBlockchain
     .map(block => block.difficulty)
     .map(difficulty => Math.pow(2,difficulty))
-    .reduce((a,b) => a + b);
+    .reduce((a,b) => a + b, 0);
 // 블록체인 재배치
 const replaceChain = candidateChain => {
   const foreignUTxOuts = isChainValid(candidateChain);
@@ -278,6 +277,7 @@ const handleIncomingTx = (tx) => {
 
 module.exports = {
   replaceChain,
+  calculateNewDifficulty,
   addBlockToChain,
   isBlockStructureValid,
   getNewestBlock,

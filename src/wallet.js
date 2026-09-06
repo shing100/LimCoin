@@ -61,8 +61,7 @@ const findAmountInUTxOuts = (amountNeeded, myUTxOuts) => {
       return { includedUTxOuts, leftOverAmount };
     }
   }
-  throw Error("Not enough founds");
-  return false;
+  throw Error("Not enough funds");
 };
 
 const createTxOuts = (receiverAddress, myAddress, amount, leftOverAmount) => {

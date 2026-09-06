@@ -45,7 +45,7 @@ const getTxId = tx => {
     .map(txOut => txOut.address + txOut.amount)
     .reduce((a, b) => a + b, "");
 
-  return CryptoJS.SHA256(txInContent + txOutContent + tx.timestamp).toString();
+  return CryptoJS.SHA256(txInContent + txOutContent).toString();
 };
 
 // genesisTx id 값을 알아내기 위한 로그
@@ -68,7 +68,6 @@ const signTxIn = (tx, txInIndex, privateKey, uTxOutList) => {
   // 참조 TxOut 체크하기
   if (referencedUTxOut === null || referencedUTxOut === undefined) {
     throw Error("Couldn't find the referenced uTxOut, not signing");
-    return;
   }
   const referencedAddress = referencedUTxOut.address;
   if (getPublicKey(privateKey) !== referencedAddress) {
@@ -195,13 +194,20 @@ const validateTxIn = (txIn, tx, uTxOutList) => {
     return false;
   } else {
     const address = wantedTxOut.address;
-    const key = ec.keyFromPublic(address, "hex");
-    return key.verify(tx.id, txIn.signature);
+    try {
+      const key = ec.keyFromPublic(address, "hex");
+      return key.verify(tx.id, txIn.signature) === true;
+    } catch (e) {
+      console.log(`Couldn't verify the signature of a txIn: ${e.message}`);
+      return false;
+    }
   }
 };
 
-const getAmountInTxIn = (txIn, uTxOutList) =>
-  findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOutList).amount;
+const getAmountInTxIn = (txIn, uTxOutList) => {
+  const uTxOut = findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOutList);
+  return uTxOut === undefined ? 0 : uTxOut.amount;
+};
 
 const validateTx = (tx, uTxOutList) => {
   if (!isTxStructureValid(tx)) {
@@ -214,9 +220,9 @@ const validateTx = (tx, uTxOutList) => {
     return false;
   }
 
-  const hasValidTxIns = tx.txIns.map(txIn =>
-    validateTxIn(txIn, tx, uTxOutList)
-  );
+  const hasValidTxIns = tx.txIns
+    .map(txIn => validateTxIn(txIn, tx, uTxOutList))
+    .every(isValid => isValid === true);
 
   if (!hasValidTxIns) {
     console.log(`The tx: ${tx} doesn't have valid txIns`);
@@ -297,9 +303,14 @@ const hasDuplicates = txIns => {
 };
 
 const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
+  if (!(txs instanceof Array) || txs.length === 0) {
+    console.log("A block must contain at least a coinbase tx");
+    return false;
+  }
   const coinbaseTx = txs[0];
   if (!validateCoinbaseTx(coinbaseTx, blockIndex)) {
     console.log("Coinbase Tx is invalid");
+    return false;
   }
 
   const txIns = _(txs)
@@ -316,7 +327,7 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
 
   return nonCoinbaseTxs
     .map(tx => validateTx(tx, uTxOutList))
-    .reduce((a, b) => a + b, true);
+    .every(isValid => isValid === true);
 };
 
 // Tx 프로세스
@@ -329,6 +340,7 @@ const processTxs = (txs, uTxOutList, blockIndex) => {
 
 module.exports = {
   getPublicKey,
+  isAddressValid,
   getTxId,
   signTxIn,
   TxIn,
