@@ -21,6 +21,7 @@ yarn test         # 테스트
 | `LIMCOIN_DATA_DIR` | 체인 저장 위치 (기본 `data/<포트>`) |
 | `LIMCOIN_WALLET_TOKEN` | 지갑 API 토큰. 지정하지 않으면 뜰 때 만들어 콘솔에 찍는다. `none` 이면 인증을 끈다(로컬 실습용) |
 | `LIMCOIN_MINE` | `1` 이면 뜨자마자 자동 채굴 시작 |
+| `LIMCOIN_MINER_THREADS` | 채굴 워커 수 (기본: 코어 수 - 1) |
 
 ### 공개 API 와 지갑 API
 
@@ -60,6 +61,18 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 채굴은 **워커 스레드**에서 돈다(`src/pow-worker.js`). 메인 스레드는 아예
 손대지 않으므로 채굴 중에도 HTTP 응답이 밀리지 않는다 — 채굴 중 `GET /info`
 평균 1.4ms 를 확인했다.
+
+워커를 여러 개 띄워 nonce 공간을 나눈다. 워커 k 는 k 부터 시작해 워커
+수만큼씩 건너뛰므로 서로 겹치지 않는다. 개수는 `LIMCOIN_MINER_THREADS`
+로 정하고, 기본은 `코어 수 - 1` 이다(메인 스레드 몫을 남긴다).
+
+워커는 **풀로 살려 두고 일감만 보낸다.** 블록마다 새로 띄우면 띄우는 값이
+채굴 시간보다 커질 수 있다 — 4코어에서 재 보니 워커 4개가 2개보다 느렸다.
+
+```
+난이도 15, 8블록 (워커 풀)
+  1개 241ms/블록   2개 163ms   3개 103ms   4개 171ms
+```
 
 다른 노드가 먼저 블록을 올리면 워커에 중단 신호를 보내 헛돌지 않게 한다.
 
@@ -132,6 +145,31 @@ curl -X POST localhost:3000/transactions -H 'Content-Type: application/json' \
 
 보조금은 210,000 블록마다 절반이 되고 결국 0 으로 수렴한다. 그 뒤로는
 수수료만 남는다.
+
+### 같은 블록 안에서 이어 쓰기
+
+앞선 트랜잭션이 만든 출력을 뒤 트랜잭션이 쓸 수 있다(in-block chaining).
+확인을 기다리지 않고 연달아 보내는 것이 여기 해당한다.
+
+- 블록을 검증하는 동안 색인을 트랜잭션마다 갱신한다
+- mempool 도 확정된 UTxOut 에 더해 mempool 이 만든 출력을 본다
+- 블록에 담을 때 부모가 자식보다 먼저 오도록 정렬하고, 자리가 모자라면
+  그 갈래를 통째로 뺀다 (부모 없는 자식만 담기면 그 블록은 거부된다)
+
+### 체인 교체(reorg) 비용
+
+우리 체인과 앞부분이 같으면 그 블록들은 이미 검증해 둔 것이다. 겹치는
+만큼은 서명 검증을 건너뛰고 UTxOut 재생만 한다 — reorg 비용을 결정하는
+것은 서명 검증이다.
+
+```
+블록 300개 재검증
+  전체 (서명 포함) 428ms  ->  접두사 건너뛰기 11ms   (39배)
+```
+
+다만 교체된 체인의 앞부분은 *우리* 블록으로 채운다. 트랜잭션 id 는 서명을
+덮지 않으므로 해시가 같으면서 서명 바이트만 다른 블록을 보낼 수 있다.
+UTxOut 결과는 같지만 그걸 저장해 두면 남에게 거부당하는 블록을 갖게 된다.
 
 **7장 Reclaiming Disk Space — 머클 트리**
 
@@ -313,6 +351,8 @@ log₂(n) 개의 해시만 있으면 된다.
 
 ### pow.js / pow-worker.js
 작업증명. 해시 계산은 메인 스레드와 워커가 함께 쓰므로 따로 두었다.
+`findNonce(header, from, budget, stride)` 의 `stride` 로 워커들이 nonce
+공간을 나눠 맡는다.
 
 ### hdwallet.js
 BIP32 방식 키 파생. `masterFromSeed`, `deriveChild`, `derivePrivateKey`.
