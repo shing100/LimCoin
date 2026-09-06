@@ -13,6 +13,7 @@ const express = require("express"),
     _ = require("lodash");
 
 const { getBlockChain, createNewBlock, getAccountBalance, sendTx, getUTxOutList, getTxProof, getNewestBlock, initChain } = Blockchain;
+const { getTxFee } = Transactions;
 const { startP2PServer, connectToPeers, getPeers } = P2P;
 const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance } = Wallet;
 const { getMempool } = Mempool;
@@ -291,6 +292,13 @@ app.get("/info", (req, res) => {
 
   // 익스플로러가 통계를 내려고 체인 전체를 받지 않아도 되게 여기서 계산한다.
   // 수수료는 이미 유통 중이던 코인이 옮겨 간 것이라 발행량이 아니다.
+  const mempool = getMempool();
+  const uTxOuts = getUTxOutList();
+  const mempoolFees = mempool.reduce(
+    (sum, tx) => sum + Math.max(0, getTxFee(tx, uTxOuts)),
+    0
+  );
+
   let txCount = 0;
   let supply = 0;
   for (const block of chain) {
@@ -304,7 +312,11 @@ app.get("/info", (req, res) => {
     difficulty: newest.difficulty,
     txCount,
     supply,
-    mempoolSize: getMempool().length,
+    mempoolSize: mempool.length,
+    // 다음 블록을 채굴하면 채굴자가 가져갈 수수료 합.
+    // UTxOut 집합을 가진 노드가 계산하는 게 맞다 — 지갑이 하려면
+    // 입력이 가리키는 출력을 되짚으려고 블록을 받아 와야 한다.
+    mempoolFees,
     mining: Miner.getStatus().running,
     coin: COIN,
     decimals: DECIMALS,

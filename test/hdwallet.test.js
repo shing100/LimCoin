@@ -199,6 +199,44 @@ test("주소 색인 페이지네이션", () => {
   assert.strictEqual(AddressIndex.getTransactions(addr(9)).total, 0);
 });
 
+test("색인은 코인베이스 여부와 전체 출력 합을 함께 기록한다", () => {
+  // 지갑은 "내가 받은 몫"과 "전체 출력 합"을 견줘 본인 이체를 가린다.
+  AddressIndex.reset();
+  const alice = addr(6);
+  const bob = addr(7);
+
+  const coinbase = {
+    id: "cb",
+    txIns: [{ txOutId: "", txOutIndex: 0, signature: "" }],
+    txOuts: [{ address: alice, amount: 10 * COIN }]
+  };
+  AddressIndex.applyBlock(blockWith(0, [coinbase]), []);
+  const cbEntry = AddressIndex.getTransactions(alice).transactions[0];
+  assert.strictEqual(cbEntry.coinbase, true);
+  assert.strictEqual(cbEntry.outputTotal, 10 * COIN);
+
+  // 앨리스가 밥에게 보낸다: 전체 출력 합 > 앨리스가 받은 거스름돈
+  const spend = {
+    id: "s1",
+    txIns: [{ txOutId: "cb", txOutIndex: 0, signature: "sig" }],
+    txOuts: [
+      { address: bob, amount: 3 * COIN },
+      { address: alice, amount: 690000000 }
+    ]
+  };
+  AddressIndex.applyBlock(
+    blockWith(1, [spend]),
+    [{ txOutId: "cb", txOutIndex: 0, address: alice, amount: 10 * COIN }]
+  );
+  const sendEntry = AddressIndex.getTransactions(alice).transactions[0];
+  assert.strictEqual(sendEntry.coinbase, false);
+  assert.strictEqual(sendEntry.outputTotal, 3 * COIN + 690000000);
+  assert.ok(
+    sendEntry.received < sendEntry.outputTotal,
+    "받은 몫이 전체 출력보다 작으면 남에게 보낸 것이다"
+  );
+});
+
 test("색인을 비우면 기록이 남지 않는다", () => {
   AddressIndex.reset();
   assert.strictEqual(AddressIndex.getIndexedAddressCount(), 0);

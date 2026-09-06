@@ -48,6 +48,11 @@ const applyBlock = (block, uTxOutsBefore) => {
   for (const tx of block.data || []) {
     const touched = new Map(); // address -> { received, spent }
 
+    const isCoinbase = tx.txIns.length === 1 && tx.txIns[0].txOutId === "";
+    // 이 트랜잭션의 전체 출력 합. 지갑이 "내가 받은 몫"과 견줘서
+    // 출력이 전부 내 주소였는지(= 본인 이체) 가릴 수 있게 담아 둔다.
+    const outputTotal = tx.txOuts.reduce((sum, txOut) => sum + txOut.amount, 0);
+
     const bump = (address, field, amount) => {
       const entry = touched.get(address) || { received: 0, spent: 0 };
       entry[field] += amount;
@@ -76,6 +81,8 @@ const applyBlock = (block, uTxOutsBefore) => {
         txId: tx.id,
         blockIndex: block.index,
         timestamp: block.timestamp,
+        coinbase: isCoinbase,
+        outputTotal,
         received,
         spent
       });
