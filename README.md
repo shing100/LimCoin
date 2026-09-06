@@ -66,12 +66,16 @@ HTTP_PORT=4002 yarn start
 curl -X POST localhost:4002/peers -H 'Content-Type: application/json' -d '{"peer":"ws://localhost:4001"}'
 ```
 
-### 제네시스 블록과 개인키
+### 제네시스 블록과 지갑
 
 - `src/genesis.json` — 제네시스 블록. **공개 정보이며 커밋 대상**이다.
   체인에 참여하는 모든 노드가 같은 파일을 공유해야 한다.
-- `src/privateKey` — 노드 지갑의 개인키. **`.gitignore` 대상이며 절대 커밋하면 안 된다.**
+- `src/wallet.json` — 지갑. 씨앗이 들어 있다.
+  **`.gitignore` 대상이며 절대 커밋하면 안 된다.**
   없으면 서버가 처음 뜰 때 자동 생성된다.
+
+예전 형식(개인키 하나짜리 `src/privateKey`)이 남아 있으면 첫 실행 때
+지갑으로 가져온다. 그 주소의 잔액은 그대로 쓸 수 있다.
 
 새 체인을 시작하려면 `yarn genesis` 를 실행한다. 제네시스 프리마인(10 LIM)은
 그때 만들어진 `src/privateKey` 를 가진 사람만 쓸 수 있으므로, 이 키를 안전한 곳에 보관할 것.
@@ -130,6 +134,31 @@ curl -X POST localhost:3000/transactions -H 'Content-Type: application/json' \
 
 블록 헤더가 커밋하는 것은 `index`, `previousHash`, `timestamp`, `merkleRoot`,
 `difficulty`, `nonce` 뿐이다. 트랜잭션 목록은 머클 루트를 통해서만 묶인다.
+
+**10장 Privacy — 트랜잭션마다 새 키**
+
+> "As an additional firewall, a new key pair should be used for each
+> transaction to keep them from being linked to a common owner."
+
+예전 지갑은 개인키 하나를 만들어 영원히 재사용했다. 그 주소에 얽힌 모든
+거래가 한 사람의 것으로 묶여 버린다.
+
+이제 씨앗 하나에서 필요한 만큼 키를 파생한다(BIP32와 같은 방식,
+`src/hdwallet.js`). 백업할 것은 여전히 하나지만 주소는 얼마든지 쓸 수 있다.
+
+갈래를 둘로 나눈다.
+
+| 경로 | |
+|---|---|
+| `m/0/i` | 받는 주소 — 남에게 알려 주는 주소 |
+| `m/1/i` | 거스름돈 — 내가 나에게 돌려받는 주소 |
+
+**송금할 때마다 거스름돈은 새 주소로 받는다.** 나누지 않으면 거스름돈
+주소가 곧 다음 받는 주소가 되어, 남에게 알려 준 주소와 거스름돈이 같은
+것이 된다.
+
+구현은 BIP32 공식 테스트 벡터로 검증한다(`test/hdwallet.test.js`).
+BIP39 니모닉은 2048단어 목록이 필요해 다루지 않는다 — 씨앗을 16진수로 쓴다.
 
 **8장 Simplified Payment Verification — 머클 증명**
 
@@ -237,10 +266,14 @@ log₂(n) 개의 해시만 있으면 된다.
 
 🔒 = 지갑 토큰 필요
 | GET  | `/me/balance` | 내 잔액 🔒 |
-| GET  | `/me/address` | 내 주소 🔒 |
+| GET  | `/me/address` | 지금 받는 주소 🔒 |
+| POST | `/me/address` | 받는 주소를 새로 만든다 🔒 |
+| GET  | `/me/addresses` | 지갑의 모든 주소와 잔액 🔒 |
 | GET  | `/mining` | 자동 채굴 상태 |
 | POST | `/mining` | 자동 채굴 켜기/끄기 (`{"enabled":true}`) 🔒 |
 | GET  | `/address/:address` | 특정 주소 잔액 |
+| GET  | `/address/:address/transactions` | 주소의 트랜잭션 내역 (`?limit`, `?offset`) |
+| GET  | `/address/:address/utxos` | 주소가 가진 미사용 출력 |
 
 
 ### transaction.js
@@ -253,6 +286,14 @@ log₂(n) 개의 해시만 있으면 된다.
 7. createCoinbaseTx
 8. processTxs
 9. validateTx
+
+### hdwallet.js
+BIP32 방식 키 파생. `masterFromSeed`, `deriveChild`, `derivePrivateKey`.
+Node 내장 `crypto` 의 HMAC-SHA512 만 쓴다.
+
+### addressIndex.js
+주소별 트랜잭션 색인. 블록을 붙일 때 갱신하므로 지갑과 익스플로러가
+체인을 훑지 않아도 된다.
 
 ### store.js
 체인을 `blocks.jsonl` 에 저장하고 읽는다. append-only, reorg 시에만 통째로 다시 쓴다.
