@@ -5,10 +5,13 @@ LimCoin, the coin made in NodeJS
 
 ```bash
 yarn install
-yarn genesis      # 최초 1회: 제네시스 블록과 지갑 개인키 생성
+yarn genesis      # 최초 1회: 제네시스 블록과 지갑 생성
 yarn dev          # 개발 서버 (nodemon)
-yarn test         # 검증 로직 테스트
+yarn test         # 테스트
 ```
+
+> Node 18 이상이 필요하다. 테스트는 Node 내장 `node:test` 를 쓰므로
+> 테스트 프레임워크를 따로 설치하지 않는다.
 
 ### 환경변수
 

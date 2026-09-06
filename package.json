@@ -15,7 +15,6 @@
     "hex-to-binary": "^1.0.1",
     "lodash": "^4.17.10",
     "morgan": "^1.9.0",
-    "nodemon": "^1.17.3",
     "ws": "^5.1.1"
   },
   "scripts": {
@@ -23,5 +22,8 @@
     "start": "node src/server.js",
     "test": "node --test test/*.test.js",
     "genesis": "node scripts/generate-genesis.js"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   }
 }
