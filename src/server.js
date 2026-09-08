@@ -154,11 +154,19 @@ app.route("/blocks").get((req, res) => {
   }
 });
 
+/*
+ * 피어 연결.
+ *
+ * 붙이는 것은 지갑 권한이 필요하다. 예전에는 아무나 POST /peers 로 이 노드를
+ * 임의의 주소에 연결시킬 수 있었다 — 피어 상한(32)을 쓰레기로 채워 진짜
+ * 피어가 못 붙게 하거나, 악성 피어에 붙여 놓을 수 있었다. 주소 형식은
+ * connectToPeers 가 본다(ws:// 또는 wss://).
+ */
 app.route("/peers")
   .get((req, res) => {
     res.send(getPeers());
   })
-  .post((req, res) => {
+  .post(requireWalletAuth, (req, res) => {
     try {
       const { body: { peer } } = req;
       if (peer === undefined) {

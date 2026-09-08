@@ -276,10 +276,32 @@ const getWalletBalance = uTxOuts => {
     .reduce((sum, uTxOut) => sum + uTxOut.amount, 0);
 };
 
+/*
+ * 어떤 출력들을 써서 amountNeeded 를 채울 것인가 (코인 선택).
+ *
+ * 예전에는 배열 순서대로 담다가 채워지면 멈췄다. 순서는 우연이라 큰 출력을
+ * 잘게 쪼개 잔돈을 남기기 일쑤였고, 그 잔돈이 쌓이면 다음 송금은 입력이
+ * 여러 개가 된다. 여기서 수수료율은 입력 수로 재므로 입력이 많을수록
+ * 블록에 담기기도 불리하다.
+ *
+ * 두 단계로 고른다.
+ *   1. 하나로 되는 출력이 있으면 그중 가장 작은 것. 입력 하나, 잔돈 최소.
+ *   2. 없으면 큰 것부터 담는다. 입력 수가 가장 적다.
+ *
+ * 비트코인 코어는 여기에 "잔돈이 안 남는 조합"을 찾는 탐색(Branch and Bound)
+ * 을 먼저 한다. 그건 다음 일이다.
+ */
 const findAmountInUTxOuts = (amountNeeded, myUTxOuts) => {
+  const single = myUTxOuts
+    .filter(uTxOut => uTxOut.amount >= amountNeeded)
+    .sort((a, b) => a.amount - b.amount)[0];
+  if (single !== undefined) {
+    return { includedUTxOuts: [single], leftOverAmount: single.amount - amountNeeded };
+  }
+
   let currentAmount = 0;
   const includedUTxOuts = [];
-  for (const myUTxOut of myUTxOuts) {
+  for (const myUTxOut of [...myUTxOuts].sort((a, b) => b.amount - a.amount)) {
     includedUTxOuts.push(myUTxOut);
     currentAmount = currentAmount + myUTxOut.amount;
     if (currentAmount >= amountNeeded) {
@@ -363,6 +385,7 @@ module.exports = {
   getMnemonic,
   restoreFromMnemonic,
   reload,
+  findAmountInUTxOuts,
   GAP_LIMIT,
   getAllKeys,
   getAddresses,

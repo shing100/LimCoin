@@ -675,8 +675,32 @@ const restoreMempool = () => {
   return restored;
 };
 
-// 지금 mempool 을 파일에 남긴다. 종료할 때 부른다.
+// 지금 mempool 을 파일에 남긴다. 종료할 때, 그리고 바뀐 뒤 잠시 후에 부른다.
 const persistMempool = () => Store.saveMempool(getMempool());
+
+/*
+ * mempool 이 바뀌면 몇 초 뒤 저장한다.
+ *
+ * 종료 신호에서만 저장하면 kill -9 나 정전에 그 사이의 것을 다 잃는다.
+ * 바뀔 때마다 바로 쓰면 트랜잭션 한 건에 파일 하나를 통째로 다시 쓰게
+ * 되므로, 잠깐 모아서 쓴다. 잃어도 마지막 몇 초 분량이다.
+ *
+ * 저장소가 열려 있지 않으면(테스트) saveMempool 이 알아서 무시한다.
+ * 타이머는 unref 해 두어 프로세스를 붙잡지 않게 한다.
+ */
+const MEMPOOL_SAVE_DELAY = 3000;
+let mempoolSaveTimer = null;
+const scheduleMempoolSave = () => {
+  if (mempoolSaveTimer !== null || !Store.isOpen()) {
+    return;
+  }
+  mempoolSaveTimer = setTimeout(() => {
+    mempoolSaveTimer = null;
+    persistMempool();
+  }, MEMPOOL_SAVE_DELAY);
+  mempoolSaveTimer.unref();
+};
+Mempool.onChange(scheduleMempoolSave);
 
 // 블록 체인 더하기
 const addBlockToChain = candidateBlock => {
