@@ -11,7 +11,8 @@ const assert = require("node:assert");
 const Keys = require("../src/keys");
 const S = require("../src/serialization");
 const Address = require("../src/address");
-const { leadingZeroBits, hashMatchesDifficulty } = require("../src/pow");
+const { leadingZeroBits, hashMeetsBits } = require("../src/pow");
+const Target = require("../src/target");
 const { getMerkleRoot } = require("../src/merkle");
 
 /* ------------------------------------------- 해시 */
@@ -176,17 +177,20 @@ test("코인베이스의 빈 txOutId 는 0 32바이트로 직렬화된다", () =
   assert.ok(S.serializeTx(cb).toString("hex").startsWith("01" + "00".repeat(32) + "07000000"));
 });
 
-test("블록 헤더는 84바이트다", () => {
+test("블록 헤더는 88바이트다", () => {
   const header = {
-    index: 5, previousHash: "11".repeat(32), timestamp: 1700000000,
-    merkleRoot: "22".repeat(32), difficulty: 15, nonce: 2 ** 40
+    version: 1, index: 5, previousHash: "11".repeat(32), timestamp: 1700000000,
+    merkleRoot: "22".repeat(32), bits: 0x1f01ffff, nonce: 2 ** 40
   };
   const bytes = S.serializeHeader(header);
-  assert.strictEqual(bytes.length, 84);
-  assert.strictEqual(bytes.readUInt32LE(0), 5);
-  assert.strictEqual(bytes.subarray(4, 36).toString("hex"), "11".repeat(32));
-  assert.strictEqual(bytes.readUInt32LE(36), 1700000000);
-  assert.strictEqual(Number(bytes.readBigUInt64LE(76)), 2 ** 40, "nonce 는 uint64 — 채굴 중 2^32 를 넘을 수 있다");
+  assert.strictEqual(bytes.length, 88);
+  assert.strictEqual(bytes.readUInt32LE(0), 1, "version");
+  assert.strictEqual(bytes.readUInt32LE(4), 5, "index");
+  assert.strictEqual(bytes.subarray(8, 40).toString("hex"), "11".repeat(32));
+  assert.strictEqual(bytes.readUInt32LE(40), 1700000000);
+  assert.strictEqual(bytes.subarray(44, 76).toString("hex"), "22".repeat(32));
+  assert.strictEqual(bytes.readUInt32LE(76), 0x1f01ffff, "bits");
+  assert.strictEqual(Number(bytes.readBigUInt64LE(80)), 2 ** 40, "nonce 는 uint64 — 채굴 중 2^32 를 넘을 수 있다");
   assert.strictEqual(S.blockHashOf(header), S.sha256dHex(bytes));
 });
 
@@ -207,8 +211,10 @@ test("앞자리 0 비트 세기", () => {
   assert.strictEqual(leadingZeroBits("0fff"), 4);
   assert.strictEqual(leadingZeroBits("00ff"), 8);
   assert.strictEqual(leadingZeroBits("0001"), 15);
-  assert.strictEqual(hashMatchesDifficulty("0001" + "f".repeat(60), 15), true);
-  assert.strictEqual(hashMatchesDifficulty("0001" + "f".repeat(60), 16), false);
+  // 목표값 비교: 앞 15비트가 0인 해시는 2^241 목표값(제네시스 bits)은 만족하고 2^240 은 못 한다
+  // (압축 표기는 가수 3바이트만 남기므로 2^241-1 은 2^241-2^224 로 잘린다 — 그래서 2^240 으로 비교)
+  assert.strictEqual(hashMeetsBits("0001" + "0".repeat(60), Target.bitsFromTarget((1n << 241n) - 1n)), true);
+  assert.strictEqual(hashMeetsBits("0001" + "0".repeat(60), Target.bitsFromTarget((1n << 240n) - 1n)), false);
 });
 
 test("머클 루트는 잎이 하나면 그 자체, 둘이면 sha256d(왼쪽||오른쪽) 다", () => {

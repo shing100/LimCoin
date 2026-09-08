@@ -1,6 +1,7 @@
 {
+  "version": 1,
   "index": 0,
-  "hash": "9002dadc48d88cea9dea881c38f9cf67c0f9456bcbc63350d948cf8a2adf7ab2",
+  "hash": "1f10a168c53e7dc4a7c91a0c407dfc8c480ad4ad9c326de63538f94955cc743e",
   "previousHash": "0000000000000000000000000000000000000000000000000000000000000000",
   "timestamp": 1788853057,
   "merkleRoot": "0548843f64bdfb26625537eec7ac828ea186eeb750f71c534ab82493e6b621c6",
@@ -22,6 +23,6 @@
       "id": "0548843f64bdfb26625537eec7ac828ea186eeb750f71c534ab82493e6b621c6"
     }
   ],
-  "difficulty": 15,
+  "bits": 520224767,
   "nonce": 0
 }

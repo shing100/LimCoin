@@ -3,32 +3,18 @@
  *
  * 이 파일은 메인 스레드와 워커 스레드 양쪽에서 쓰인다. 해시를 돌리는
  * 부분(findNonce)에는 어떤 상태도 없으므로 그대로 워커에 넘길 수 있다.
+ *
+ * 난이도는 목표값(target.js)이다. 해시를 큰 정수로 읽어 target 이하이면
+ * 통과다. 예전의 "앞자리 0 비트 개수"는 한 칸이 2배라 너무 거칠었다.
  */
 const { blockHashOf } = require("./serialization");
+const Target = require("./target");
 
-// 헤더 해시 = sha256d(84바이트 헤더). 본문이 아니라 머클 루트가 들어간다 (백서 7장).
-// 예전에는 필드를 문자열로 이어 붙여 SHA256 한 번이었다 — serialization.js 참고.
-const createHash = (index, previousHash, timestamp, merkleRoot, difficulty, nonce) =>
-  blockHashOf({ index, previousHash, timestamp, merkleRoot, difficulty, nonce });
+// 헤더 해시 = sha256d(88바이트 헤더). 본문이 아니라 머클 루트가 들어간다 (백서 7장).
+const createHash = header => blockHashOf(header);
 
-// 난이도 = 해시 앞에 붙어야 하는 0 비트 개수.
-// hex 한 글자가 4비트이므로 글자 단위로 세고 마지막 글자만 비트를 본다.
-const leadingZeroBits = hash => {
-  let bits = 0;
-  for (const ch of hash) {
-    const nibble = parseInt(ch, 16);
-    if (nibble === 0) {
-      bits += 4;
-      continue;
-    }
-    // 이 nibble 의 앞자리 0 개수 (1..3)
-    bits += nibble < 2 ? 3 : nibble < 4 ? 2 : nibble < 8 ? 1 : 0;
-    break;
-  }
-  return bits;
-};
-
-const hashMatchesDifficulty = (hash, difficulty) => leadingZeroBits(hash) >= difficulty;
+// 해시가 bits 가 가리키는 목표값 이하인가 (검증용 — 채굴 루프는 compileTarget 을 쓴다)
+const hashMeetsBits = Target.hashMeetsBits;
 
 /**
  * 조건을 만족하는 nonce 를 찾는다.
@@ -40,11 +26,12 @@ const hashMatchesDifficulty = (hash, difficulty) => leadingZeroBits(hash) >= dif
  * from=k, stride=N 으로 돌면 nonce 공간을 N 등분해 맡는다.
  */
 const findNonce = (header, from, budget, stride = 1) => {
-  const { index, previousHash, timestamp, merkleRoot, difficulty } = header;
+  const { version, index, previousHash, timestamp, merkleRoot, bits } = header;
+  const compiled = Target.compileTarget(bits);
   let nonce = from;
   for (let i = 0; i < budget; i++) {
-    const hash = createHash(index, previousHash, timestamp, merkleRoot, difficulty, nonce);
-    if (hashMatchesDifficulty(hash, difficulty)) {
+    const hash = createHash({ version, index, previousHash, timestamp, merkleRoot, bits, nonce });
+    if (Target.hashMeetsCompiled(hash, compiled)) {
       return { nonce, hash };
     }
     nonce += stride;
@@ -52,4 +39,4 @@ const findNonce = (header, from, budget, stride = 1) => {
   return null;
 };
 
-module.exports = { createHash, hashMatchesDifficulty, leadingZeroBits, findNonce };
+module.exports = { createHash, hashMeetsBits, leadingZeroBits: Target.leadingZeroBits, findNonce };

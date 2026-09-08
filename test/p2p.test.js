@@ -72,7 +72,8 @@ test("높이만 앞선 가짜 블록으로 체인이 바뀌지 않는다", () =>
         timestamp: Math.round(Date.now() / 1000),
         merkleRoot: "가짜",
         data: [],
-        difficulty: 1,
+        version: 1,
+        bits: 0x207fffff,
         nonce: 0
       }
     ]

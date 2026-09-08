@@ -8,6 +8,7 @@
  * 노드를 띄울 때 LIMCOIN_MINE=1 이거나 POST /mining 으로 켤 수 있다.
  */
 const Blockchain = require("./blockchain");
+const Target = require("./target");
 
 const { createNewBlock } = Blockchain;
 
@@ -24,7 +25,7 @@ const loop = async () => {
       const block = await createNewBlock();
       mined++;
       lastError = null;
-      console.log(`채굴: 블록 #${block.index} (난이도 ${block.difficulty}, tx ${block.data.length}건)`);
+      console.log(`채굴: 블록 #${block.index} (난이도 ${Target.difficultyOf(block.bits).toFixed(0)}, tx ${block.data.length}건)`);
     } catch (e) {
       // 다른 노드가 먼저 블록을 올렸거나 잔액이 모자란 경우.
       // 루프를 세우지 않고 다음 회차로 넘어간다.

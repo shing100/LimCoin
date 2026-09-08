@@ -91,14 +91,16 @@ txid = sha256d(위 바이트)
 { "index", "hash", "previousHash", "timestamp", "merkleRoot", "difficulty", "nonce", "data": [tx…] }
 ```
 
-### 4.1 헤더 직렬화 (84바이트) 와 블록 해시
+### 4.1 헤더 직렬화 (88바이트) 와 블록 해시
 
 ```
-uint32 index ‖ 32B previousHash ‖ uint32 timestamp ‖ 32B merkleRoot ‖ uint32 difficulty ‖ uint64 nonce
+uint32 version ‖ uint32 index ‖ 32B previousHash ‖ uint32 timestamp ‖ 32B merkleRoot ‖ uint32 bits ‖ uint64 nonce
 hash = sha256d(헤더)
 ```
 
-`nonce` 는 uint64 — 채굴 중 2^32 를 넘을 수 있다. 제네시스의 `previousHash` 는 0 32바이트.
+`version` 은 1. 규칙을 바꿀 때 채굴자가 새 값을 적어 찬성을 표시하는 자리다(BIP9 식).
+`bits` 는 압축 목표값(4.3). `nonce` 는 uint64 — 채굴 중 2^32 를 넘을 수 있다.
+제네시스의 `previousHash` 는 0 32바이트.
 
 ### 4.2 머클 루트
 
@@ -110,9 +112,11 @@ CVE-2012-2459 를 막는다). 잎이 하나면 그것이 루트.
 
 | 규칙 | 값 |
 |---|---|
-| 작업증명 | `hash` 의 앞자리 0 비트 ≥ `difficulty`, 그리고 `difficulty` 가 그 높이의 기대 난이도와 **같다** |
-| 난이도 조정 | `index` 가 10의 배수인 블록 다음에. 그 블록과 10블록 앞 블록(`index−10`)의 타임스탬프 차이(=10블록이 걸린 시간)가 50초 미만이면 +1, 200초 초과면 −1(최소 1), 아니면 유지. 기준은 마지막 **진짜** 난이도(아래 특별 블록은 건너뜀). 목표 10초/블록 |
-| 최소 난이도 블록 (테스트넷만) | 직전 블록보다 200초(목표의 20배) 넘게 뒤의 타임스탬프면 기대 난이도는 1 이다. 그 다음 블록은 특별 블록을 건너뛴 마지막 난이도로 돌아간다. 메인넷에는 없다 |
+| 작업증명 | `hash` 를 256비트 정수로 읽어(hex 그대로, 빅 엔디언) `target(bits)` **이하**, 그리고 `bits` 가 그 높이의 기대값과 **같다** |
+| `bits` ↔ `target` | 비트코인 nBits 와 같다. `bits = 지수(1B) ‖ 가수(3B)`, `target = 가수 × 256^(지수−3)`. 가수의 첫 비트(0x00800000)는 음수 표시라 쓰지 않는다. 가수 0, 음수, `POW_LIMIT` 보다 큰 값은 무효 |
+| `POW_LIMIT` (바닥) | `bits = 0x207fffff` → `target = 0x7fffff × 256^29` (≈2^255). 사람이 읽는 난이도 = `POW_LIMIT / target` (바닥 = 1) |
+| 목표값 조정 (LWMA) | 블록마다. 처음 `lwmaWindow`(N=60) 블록은 제네시스의 `bits`. 그 뒤로 최근 N 블록의 풀이 시간 `s_i = ts_i − ts_{i−1}` 을 [1, 6T] 로 잘라 가중치 1..N(최근이 N)으로 합한다: `next = avg(target_i) × Σ(s_i·i) / (T·N(N+1)/2)`, T=10초. 결과는 `POW_LIMIT` 이하, 1 이상. `bits` 로 압축한 값이 기대값 |
+| 최소 난이도 블록 (테스트넷·regtest) | 직전 블록보다 200초(20T) 넘게 뒤의 타임스탬프면 기대 `bits` 는 `POW_LIMIT`. LWMA 창 안에서 그런 블록(특별 블록: `bits = POW_LIMIT` 이고 200초 넘게 뒤)은 풀이 시간 T, 목표값은 직전 진짜 값으로 바꿔 넣는다(중립). 메인넷에는 없다 |
 | 타임스탬프 | 직전 11블록의 중앙값(MTP) **초과**, 검증 노드 시계 +2시간 이하 |
 | 연결 | `index = 직전+1`, `previousHash = 직전 hash` |
 | 머클 | `merkleRoot = 머클루트(data)` |
@@ -125,17 +129,22 @@ CVE-2012-2459 를 막는다). 잎이 하나면 그것이 루트.
 
 ### 4.5 체인 선택
 
-무게 = `Σ 2^difficulty`. 더 무거운 유효 체인이 이긴다. 같은 무게면 먼저 본 것.
+무게 = `Σ (2^256 − target_i) / (target_i + 1) + 1` — 블록마다 목표값을 맞히는 데 드는
+평균 해시 횟수의 합. 더 무거운 유효 체인이 이긴다. 같은 무게면 먼저 본 것.
+API 와 P2P 에서는 10진 문자열로 나타낸다(64비트를 넘는다).
 
 ## 5. 망
 
-| | mainnet | testnet |
-|---|---|---|
-| 주소 version | `0x30` | `0x6f` |
-| 제네시스 | `src/genesis.json` | `src/genesis.testnet.json` |
-| P2P 매직 | `limcoin/main/1` | `limcoin/test/1` |
-| 기본 데이터 경로 | `data/mainnet/<port>` | `data/testnet/<port>` |
-| 최소 난이도 블록 (4.3) | 없다 | 200초 넘게 비면 허용 |
+| | mainnet | testnet | regtest |
+|---|---|---|---|
+| 주소 version | `0x30` | `0x6f` | `0x6f` |
+| 제네시스 | `src/genesis.json` | `src/genesis.testnet.json` | 테스트넷 것 |
+| P2P 매직 | `limcoin/main/1` | `limcoin/test/1` | `limcoin/regtest/1` |
+| 기본 데이터 경로 | `data/mainnet/<port>` | `data/testnet/<port>` | `data/regtest/<port>` |
+| 최소 난이도 블록 (4.3) | 없다 | 200초 넘게 비면 허용 | 허용 |
+| LWMA 창 (4.3) | 60 | 60 | 8 |
+
+regtest 는 한 기계에서 혼자 돌려 보는 망이다. 창이 작아 몇 블록 만에 조정이 도는 것을 볼 수 있다.
 
 `LIMCOIN_NETWORK` 로 고른다. 매직이 다른 피어는 `HELLO` 를 보고 끊는다.
 
@@ -192,7 +201,7 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 
 | | |
 |---|---|
-| `LIMCOIN_NETWORK` | `mainnet`(기본) / `testnet` |
+| `LIMCOIN_NETWORK` | `mainnet`(기본) / `testnet` / `regtest` |
 | `HTTP_PORT` | HTTP 와 P2P(같은 포트, WebSocket 업그레이드) |
 | `LIMCOIN_DATA_DIR` | 체인·mempool 저장 위치 |
 | `LIMCOIN_WALLET_TOKEN` | 지갑 API 토큰. `none` 이면 인증 끔(로컬만) |

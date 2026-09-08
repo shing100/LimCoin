@@ -6,6 +6,7 @@ const Wallet = require("./wallet"),
   AddressIndex = require("./addressIndex"),
   ChainIndex = require("./chainIndex"),
   PoW = require("./pow"),
+  Target = require("./target"),
   { Worker } = require("worker_threads"),
   os = require("os"),
   path = require("path");
@@ -35,8 +36,9 @@ const {
 } = Mempool;
 const { indexByOutpoint } = require("./utxo");
 
-const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기
-const DIFFICULTY_ADJUSMENT_INTERVAL = 10; // 난이도 조정 주기
+const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기(초)
+// 헤더 version. 규칙을 바꿀 때 채굴자가 새 값을 적어 찬성을 표시하는 자리다.
+const BLOCK_VERSION = 1;
 /*
  * 타임스탬프 규칙. 비트코인과 같은 방식이다.
  *
@@ -55,13 +57,12 @@ const DIFFICULTY_ADJUSMENT_INTERVAL = 10; // 난이도 조정 주기
  */
 const MEDIAN_TIME_SPAN = 11;
 const MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60;
-const MIN_DIFFICULTY = 1; // 0 이면 어떤 해시든 통과해 버린다
 
 /*
  * 블록 = 헤더 + 본문.
  *
- * 헤더가 커밋하는 것은 index, previousHash, timestamp, merkleRoot,
- * difficulty, nonce 뿐이다. 트랜잭션 목록(data)은 머클 루트를 통해서만
+ * 헤더가 커밋하는 것은 version, index, previousHash, timestamp, merkleRoot,
+ * bits, nonce 뿐이다. 트랜잭션 목록(data)은 머클 루트를 통해서만
  * 묶인다 — 백서 7장 "transactions are hashed in a Merkle Tree, with only
  * the root included in the block's hash".
  *
@@ -70,14 +71,15 @@ const MIN_DIFFICULTY = 1; // 0 이면 어떤 해시든 통과해 버린다
  * 트랜잭션 하나가 블록에 있는지 확인하려면 블록 전체를 받아야 했다.
  */
 class Block{
-  constructor(index, hash, previousHash, timestamp, merkleRoot, data, difficulty, nonce){
+  constructor(version, index, hash, previousHash, timestamp, merkleRoot, data, bits, nonce){
+    this.version = version;
     this.index = index;
     this.hash = hash;
     this.previousHash = previousHash;
     this.timestamp = timestamp;
     this.merkleRoot = merkleRoot;
     this.data = data;
-    this.difficulty = difficulty;
+    this.bits = bits;
     this.nonce = nonce;
   }
 }
@@ -89,13 +91,14 @@ const Params = require("./params");
 const genesisData = require(Params.current().genesisFile);
 
 const genesisBlock = new Block(
+  genesisData.version,
   genesisData.index,
   genesisData.hash,
   genesisData.previousHash,
   genesisData.timestamp,
   genesisData.merkleRoot,
   genesisData.data,
-  genesisData.difficulty,
+  genesisData.bits,
   genesisData.nonce
 );
 
@@ -209,13 +212,13 @@ const createNewRawBlock = async (data, { restartOnNewTx = false } = {}) => {
    * (비트코인 코어의 GetMinimumTime 과 같은 처리다)
    */
   const newTimestamp = Math.max(getTimestamp(), medianTimePast(blockchain) + 1);
-  const difficulty = difficultyForNext(blockchain, newTimestamp);
+  const bits = bitsForNext(blockchain, newTimestamp);
   const mining = findBlockInWorkers(
     newBlockIndex,
     previousBlock.hash,
     newTimestamp,
     data,
-    difficulty
+    bits
   );
 
   /*
@@ -257,88 +260,55 @@ const createNewRawBlock = async (data, { restartOnNewTx = false } = {}) => {
   return newBlock;
 }
 
-// 블록 난이도 찾기 와 조정
+// 다음 블록의 목표값
 /*
- * chain 다음에 올 블록이 가져야 하는 난이도.
+ * chain 다음에 올 블록이 가져야 하는 bits(압축 목표값).
  *
- * 예전에는 우리 체인만 볼 수 있었다(findDifficulty). 그래서 남이 보낸
- * 후보 체인의 블록은 난이도를 스스로 정해도 아무도 따지지 않았다.
- * 검증하는 쪽은 그 체인의 앞부분을 기준으로 계산해야 한다.
+ * 검증하는 쪽은 *후보 체인의* 앞부분을 기준으로 계산한다 — 우리 체인만
+ * 보면 남이 보낸 체인의 난이도를 따질 수 없다. 채굴하는 쪽도 같은 함수를
+ * 쓰므로 둘이 어긋날 수 없다.
+ *
+ * 목표값은 블록마다 LWMA 로 고친다(target.js). 처음 lwmaWindow 블록은
+ * 제네시스의 목표값을 그대로 쓴다.
  */
-const difficultyForNext = (chain, newTimestamp) => {
+const bitsForNext = (chain, newTimestamp) => {
   const newestBlock = chain[chain.length - 1];
+  const params = Params.current();
 
   /*
    * 테스트넷의 "20분 규칙" (비트코인 fPowAllowMinDifficultyBlocks).
    *
    * 큰 채굴자가 난이도를 올려 놓고 떠나면 남은 노트북은 블록 하나에 몇
-   * 시간이 걸리고, 난이도는 10블록마다 1씩만 내려가니 체인이 사실상 멎는다.
-   * 테스트넷은 값어치가 없으므로, 직전 블록 뒤로 목표 주기의 20배(200초)가
-   * 지났으면 그 블록은 최소 난이도로 만들어도 받아 준다. 그 다음 블록은
-   * 다시 원래 난이도로 돌아간다(특별 블록의 난이도를 이어받지 않는다).
+   * 시간이 걸려 체인이 사실상 멎는다. 테스트넷은 값어치가 없으므로, 직전
+   * 블록 뒤로 목표 주기의 20배(200초)가 지났으면 그 블록은 최소 난이도로
+   * 만들어도 받아 준다. 그 다음 블록은 원래 난이도로 돌아간다 — LWMA 창
+   * 안에서 특별 블록은 중립으로 취급한다(isSpecialBlock).
    * 메인넷에는 없다 — 시간을 앞당겨 적은 채굴자가 난이도를 피할 수 있으므로.
    */
-  const params = Params.current();
   if (
     params.allowMinDifficultyBlocks &&
     typeof newTimestamp === "number" &&
     newTimestamp > newestBlock.timestamp + BlOCK_GENERATION_INTERVAL * 20
   ) {
-    return MIN_DIFFICULTY;
+    return Target.POW_LIMIT_BITS;
   }
 
-  if(newestBlock.index % DIFFICULTY_ADJUSMENT_INTERVAL === 0 && newestBlock.index !== 0) {
-    return calculateNewDifficulty(newestBlock, chain);
-  }
-  return lastRealDifficulty(chain);
-}
-
-/*
- * 특별(최소 난이도) 블록을 건너뛴 마지막 진짜 난이도.
- * 조정 높이의 블록은 특별 블록이 아니므로 거기서 멈춘다.
- * 메인넷에서는 그냥 끝 블록의 난이도다.
- */
-const lastRealDifficulty = chain => {
-  if (!Params.current().allowMinDifficultyBlocks) {
-    return chain[chain.length - 1].difficulty;
-  }
-  let i = chain.length - 1;
-  while (
-    i > 0 &&
-    chain[i].index % DIFFICULTY_ADJUSMENT_INTERVAL !== 0 &&
-    chain[i].difficulty === MIN_DIFFICULTY
-  ) {
-    i--;
-  }
-  return chain[i].difficulty;
+  return Target.nextTargetBits(chain, {
+    T: BlOCK_GENERATION_INTERVAL,
+    N: params.lwmaWindow,
+    genesisBits: genesisBlock.bits,
+    isSpecial: params.allowMinDifficultyBlocks ? isSpecialBlock : () => false
+  });
 };
 
-const findDifficulty = () => difficultyForNext(getBlockChain(), getTimestamp());
+// 테스트넷 특별(최소 난이도) 블록인가: 직전 블록보다 200초 넘게 뒤이고 bits 가 바닥이다
+const isSpecialBlock = (i, chain) =>
+  i > 0 &&
+  chain[i].bits === Target.POW_LIMIT_BITS &&
+  chain[i].timestamp > chain[i - 1].timestamp + BlOCK_GENERATION_INTERVAL * 20;
 
-// 난이도 계산기
-/*
- * 조정 높이(10의 배수)에서 다음 난이도.
- *
- * 마지막 10블록이 걸린 시간을 목표(100초)와 견준다. 10블록의 시간은 그
- * 앞 블록(index-10)의 타임스탬프에서 끝 블록까지다. 예전에는 index-9 부터
- * 재서 9구간을 10구간으로 치는 바람에 "너무 빨랐다"로 기울었다 — 비트코인에
- * 있는 것과 같은 오프바이원인데, 우리는 호환할 옛 체인이 없으니 고친다.
- *
- * 기준 난이도는 마지막 진짜 난이도다(테스트넷 특별 블록은 건너뛴다).
- */
-const calculateNewDifficulty = (newestBlock, blockchain) => {
-  const windowStart = blockchain[blockchain.length - 1 - DIFFICULTY_ADJUSMENT_INTERVAL];
-  const base = lastRealDifficulty(blockchain);
-  const timeExpected = BlOCK_GENERATION_INTERVAL * DIFFICULTY_ADJUSMENT_INTERVAL;
-  const timeTaken = newestBlock.timestamp - windowStart.timestamp;
-  if(timeTaken < timeExpected/2){
-    return base + 1;
-  }else if(timeTaken > timeExpected*2){
-    return Math.max(MIN_DIFFICULTY, base - 1);
-  }else{
-    return base;
-  }
-}
+// 지금 채굴하면 써야 할 bits
+const findBits = () => bitsForNext(getBlockChain(), getTimestamp());
 
 /*
  * nonce 찾기를 워커 스레드에 맡긴다.
@@ -408,9 +378,9 @@ const stopMiners = async () => {
   await Promise.all(workers.map(worker => worker.terminate()));
 };
 
-const findBlockInWorkers = (index, previousHash, timestamp, data, difficulty) => {
+const findBlockInWorkers = (index, previousHash, timestamp, data, bits) => {
   const merkleRoot = getMerkleRoot(data);
-  const header = { index, previousHash, timestamp, merkleRoot, difficulty };
+  const header = { version: BLOCK_VERSION, index, previousHash, timestamp, merkleRoot, bits };
 
   const workers = getPool();
   const stride = workers.length;
@@ -449,8 +419,8 @@ const findBlockInWorkers = (index, previousHash, timestamp, data, difficulty) =>
         }
         win(
           new Block(
-            index, message.hash, previousHash, timestamp,
-            merkleRoot, data, difficulty, message.nonce
+            BLOCK_VERSION, index, message.hash, previousHash, timestamp,
+            merkleRoot, data, bits, message.nonce
           )
         );
       };
@@ -493,8 +463,8 @@ const medianTimePast = chain => {
 const isTimeStampValid = (newBlock, chainSoFar) =>
   newBlock.timestamp > medianTimePast(chainSoFar) &&
   newBlock.timestamp <= getTimestamp() + MAX_FUTURE_BLOCK_TIME;
-// 헤시 만들기
-const getBlockHash = block => createHash(block.index, block.previousHash, block.timestamp, block.merkleRoot, block.difficulty, block.nonce);
+// 헤더 해시
+const getBlockHash = block => createHash(headerOf(block));
 
 // genesis Block 초기 hash 값 넣기
 //console.log(createHash(genesisBlock));
@@ -543,22 +513,25 @@ const isBlockValid = (candidateBlock, chainSoFar) => {
  */
 const isHeaderValid = (header, chainSoFar) => {
   const latestBlock = chainSoFar[chainSoFar.length - 1];
-  const expectedDifficulty = difficultyForNext(
-    chainSoFar,
-    header !== null && typeof header === "object" ? header.timestamp : undefined
-  );
 
   if(!isHeaderStructureValid(header)){
     console.log('The header structure is not valid');
     return false;
-  }else if(header.difficulty < MIN_DIFFICULTY){
-    console.log('The block difficulty is not valid');
+  }
+  if(header.version < 1){
+    console.log('The block version is not valid');
     return false;
-  }else if(header.difficulty !== expectedDifficulty){
-    console.log(`The block difficulty ${header.difficulty} is not the expected ${expectedDifficulty}`);
+  }
+  if(!Target.isValidBits(header.bits)){
+    console.log(`The block bits are not valid: ${header.bits}`);
     return false;
-  }else if(!PoW.hashMatchesDifficulty(header.hash, header.difficulty)){
-    console.log('The block hash does not meet the claimed difficulty');
+  }
+  const expectedBits = bitsForNext(chainSoFar, header.timestamp);
+  if(header.bits !== expectedBits){
+    console.log(`The block bits ${header.bits.toString(16)} are not the expected ${expectedBits.toString(16)}`);
+    return false;
+  }else if(!PoW.hashMeetsBits(header.hash, header.bits)){
+    console.log('The block hash does not meet the claimed target');
     return false;
   }else if(latestBlock.index + 1 !== header.index){
     console.log('The block doesnt have a valid index')
@@ -580,22 +553,24 @@ const isHeaderValid = (header, chainSoFar) => {
 const isHeaderStructureValid = header =>
   header !== null &&
   typeof header === "object" &&
+  Number.isInteger(header.version) &&
   typeof header.index === 'number' &&
   typeof header.hash === 'string' &&
   typeof header.previousHash === 'string' &&
   typeof header.timestamp === 'number' &&
   typeof header.merkleRoot === 'string' &&
-  typeof header.difficulty === 'number' &&
+  Number.isInteger(header.bits) &&
   typeof header.nonce === 'number';
 
 // 블록에서 헤더만 떼어 낸다 (본문 없이 보낼 때)
 const headerOf = block => ({
+  version: block.version,
   index: block.index,
   hash: block.hash,
   previousHash: block.previousHash,
   timestamp: block.timestamp,
   merkleRoot: block.merkleRoot,
-  difficulty: block.difficulty,
+  bits: block.bits,
   nonce: block.nonce
 });
 
@@ -606,11 +581,13 @@ const isBlockStructureValid = (block) => {
     return false;
   }
   return (
+    Number.isInteger(block.version) &&
     typeof block.index === 'number' &&
     typeof block.hash === 'string' &&
     typeof block.previousHash === 'string' &&
     typeof block.timestamp === 'number' &&
     typeof block.merkleRoot === 'string' &&
+    Number.isInteger(block.bits) &&
     block.data instanceof Array
   );
 };
@@ -719,15 +696,10 @@ const isChainValid = (candidateChain) => {
     };
     return { chain, uTxOuts: working, undo, common, uTxOutsAtCommon };
 };
-// 난이도 구분하기
-// 체인의 무게. 난이도 d 인 블록은 평균 2^d 번 해시해야 나오므로 그만큼 일한 것이다.
+// 체인의 무게 = 블록마다 목표값을 맞히는 데 드는 평균 해시 횟수(2^256/(target+1))의 합. BigInt.
 // 헤더만 있어도 셀 수 있다 — 동기화 때 블록을 받기 전에 비교하는 데 쓴다.
 const chainWork = anyBlockchain =>
-  anyBlockchain
-    .map(block => block.difficulty)
-    .map(difficulty => Math.pow(2,difficulty))
-    .reduce((a,b) => a + b, 0);
-const sumDifficulty = chainWork;
+  anyBlockchain.reduce((sum, block) => sum + Target.workOf(block.bits), 0n);
 // 블록체인 재배치
 const replaceChain = candidateChain => {
   const validated = isChainValid(candidateChain);
@@ -1148,9 +1120,6 @@ module.exports = {
   // 테스트용 — 채굴 워커를 직접 다룬다
   findBlockInWorkers,
   getMinerPool: getPool,
-  MIN_DIFFICULTY,
-  BlOCK_GENERATION_INTERVAL,
-  DIFFICULTY_ADJUSMENT_INTERVAL,
   initChain,
   persistMempool,
   rebuildIndexes,
@@ -1158,9 +1127,10 @@ module.exports = {
   getBlockByHash,
   getBlockByHeight,
   findTx,
-  calculateNewDifficulty,
-  difficultyForNext,
-  lastRealDifficulty,
+  bitsForNext,
+  findBits,
+  BLOCK_VERSION,
+  BlOCK_GENERATION_INTERVAL,
   medianTimePast,
   MAX_FUTURE_BLOCK_TIME,
   isBlockValid,

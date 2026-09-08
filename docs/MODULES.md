@@ -1,8 +1,14 @@
 ### blockchain.js
 1. genesisTx, genesisBlock 초기 제네시스 Tx, block 생성 함수
 2. getNewestBlock 새로운(가장 최근) 블럭 가져오기 함수
-3. hashMatchesDifficulty, calculateNewDifficulty 난이도 계산, 설정 함수
-4. createHash 해쉬 만들기 함수 CryptoJS 사용
+3. bitsForNext 다음 블록의 압축 목표값(target.js 의 LWMA), isHeaderValid 검증
+4. createHash 헤더 해시(serialization.js, sha256d)
+
+### target.js
+1. targetFromBits / bitsFromTarget 압축 목표값 인코딩 (비트코인 nBits)
+2. workOf, difficultyOf 무게와 표시용 난이도
+3. nextTargetBits LWMA 로 다음 목표값
+4. compileTarget / hashMeetsCompiled 채굴 루프용 빠른 비교
 
 
 ### memPool.js

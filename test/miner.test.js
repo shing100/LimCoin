@@ -15,18 +15,21 @@ const Mempool = require("../src/memPool");
 const { createCoinbaseTx, getTxId } = require("../src/transactions");
 const { toHexString } = require("../src/utils");
 const PoW = require("../src/pow");
+const Target = require("../src/target");
 const { newAddress, ecShim, coinbaseBlockOnto } = require("./helpers");
 
 const genesis = getBlockChain()[0];
 const data = () => [createCoinbaseTx(newAddress(), 1, 0)];
-const mine = difficulty =>
-  findBlockInWorkers(1, genesis.hash, genesis.timestamp + 1, data(), difficulty);
+const EASY = Target.POW_LIMIT_BITS; // 해시 둘에 하나가 통과
+const IMPOSSIBLE = 0x01010000;      // target 1
+const mine = bits =>
+  findBlockInWorkers(1, genesis.hash, genesis.timestamp + 1, data(), bits);
 
 test.after(() => stopMiners());
 
 test("cancel() 은 채굴 promise 를 거절로 끝내고, 풀은 다음 일감을 받는다", async () => {
-  // 난이도 60 은 끝나지 않는다 — 취소로만 풀린다
-  const mining = mine(60);
+  // target 1 은 끝나지 않는다 — 취소로만 풀린다
+  const mining = mine(IMPOSSIBLE);
   mining.cancel("다른 블록이 먼저 왔다");
   await assert.rejects(mining, /다른 블록이 먼저 왔다/);
 
@@ -36,18 +39,16 @@ test("cancel() 은 채굴 promise 를 거절로 끝내고, 풀은 다음 일감�
     assert.strictEqual(worker.listenerCount("error"), 0);
   }
 
-  const block = await mine(1);
+  const block = await mine(EASY);
   assert.strictEqual(block.index, 1);
+  assert.strictEqual(block.version, 1);
   assert.strictEqual(block.previousHash, genesis.hash);
-  assert.ok(PoW.hashMatchesDifficulty(block.hash, 1));
-  assert.strictEqual(
-    PoW.createHash(block.index, block.previousHash, block.timestamp, block.merkleRoot, block.difficulty, block.nonce),
-    block.hash
-  );
+  assert.ok(PoW.hashMeetsBits(block.hash, EASY));
+  assert.strictEqual(PoW.createHash(block), block.hash);
 });
 
 test("이미 끝난 채굴을 취소해도 아무 일도 없다", async () => {
-  const mining = mine(1);
+  const mining = mine(EASY);
   const block = await mining;
   mining.cancel("늦은 취소");
   assert.ok(block.hash);
@@ -64,8 +65,8 @@ test("워커가 죽으면 풀을 버리고 다음 채굴이 새로 띄운다", a
   // 수정 전에는 죽은 워커가 풀에 남아 그 워커의 일감은 영원히 답이 없었다
   const fresh = getMinerPool();
   assert.notStrictEqual(fresh, pool);
-  const block = await mine(1);
-  assert.ok(PoW.hashMatchesDifficulty(block.hash, 1));
+  const block = await mine(EASY);
+  assert.ok(PoW.hashMeetsBits(block.hash, EASY));
 });
 
 test("채굴 중 새 트랜잭션이 오면 템플릿을 다시 만들어 지금 파는 블록에 담는다", async () => {
@@ -76,7 +77,7 @@ test("채굴 중 새 트랜잭션이 오면 템플릿을 다시 만들어 지금
   let chain = [genesis];
   for (let i = 0; i < 11; i++) {
     const tip = coinbaseBlockOnto(
-      chain[chain.length - 1], minerAddress, i * 10, Blockchain.difficultyForNext(chain)
+      chain[chain.length - 1], minerAddress, i * 10, Blockchain.bitsForNext(chain)
     );
     chain = chain.concat([tip]);
   }
