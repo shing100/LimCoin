@@ -36,7 +36,9 @@ yarn test         # 테스트
 1. **헤더** (`GET_HEADERS`) — 본문 없는 블록, 300바이트쯤. locator 로 공통
    지점을 찾아 2000개씩 받으며 검증한다(작업증명, 난이도, 타임스탬프,
    연결). 다 받은 뒤 무게를 직접 잰다. 우리보다 무겁지 않으면 여기서 끝 —
-   블록을 내려받는 값을 쓰지 않는다.
+   블록을 내려받는 값을 쓰지 않는다. 받는 동안 들고 있는 것은 마지막 32개
+   헤더(검증에 필요한 만큼), 누적 무게, 해시 목록뿐이다 — 헤더 객체를 전부
+   쌓아 두면 10만 블록에 40MB 쯤이 된다.
 2. **블록** (`GET_BLOCKS`) — 무거울 때만. 갈라진 지점 다음부터 500블록 /
    4MB 이내로 받는다. 헤더에서 보지 못한 블록이 오면 버린다.
 
@@ -63,6 +65,21 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" -d '{"peer":"ws://c:3000"}' loc
 (1초 → 60초 상한) 상대가 죽어 있는 동안 도배하지 않는다. 예전에는 한 번
 끊기면 그걸로 끝이었다 — 상대가 재시작하는 동안 우리는 조용히 혼자가 됐다.
 `DELETE /peers` 로 잊으면 재연결도 멈춘다.
+
+**피어가 피어를 알려 준다** (비트코인의 `addr` 교환). 붙으면 자기 공개
+주소를 알리고(`HELLO`), 아는 피어 목록을 주고받는다(`GET_PEERS`). 새로 알게
+된 주소에는 outbound 상한(8)까지 알아서 붙는다. 한 노드만 알고 시작해도
+그물이 이어진다.
+
+```bash
+LIMCOIN_PUBLIC_URL=ws://203.0.113.5:3000   # 남이 나에게 걸 수 있는 주소
+curl localhost:3000/peers/known             # 배웠지만 아직 붙지 않은 것까지
+```
+
+공개 주소는 스스로 알 수 없다(들어온 연결에서 보이는 것은 상대의 임시
+포트다). 없으면 남의 주소를 배우기만 하고 우리를 알리지는 못한다. 서로를
+동시에 알게 되어 양쪽이 동시에 걸면 소켓이 둘이 되는데, 공개 주소가
+사전순으로 앞선 쪽이 자기가 건 것을 남기는 규칙으로 하나를 끊는다.
 
 `POST /peers` 는 지갑 토큰이 필요하다. 예전에는 아무나 이 노드를 임의의
 주소에 연결시킬 수 있었다 — 피어 상한을 쓰레기로 채우거나 악성 피어에
@@ -340,6 +357,20 @@ UTxOut 은 만들어진 블록의 높이(`blockIndex`)와 코인베이스 여부
 UTxOut 집합을 가진 노드만 할 수 있다. 주소 색인이 블록에 대해 하는 일을
 mempool 에 대해 하는 셈이라 응답 모양도 색인과 맞췄다.
 
+### 권장 수수료
+
+```
+GET /fees   →  { perInput, congested, mempoolSize, blockCapacity }
+GET /info   →  ... recommendedFeePerInput ...
+```
+
+블록에는 코인베이스를 뺀 99건이 수수료율(수수료 / 입력 수) 높은 순으로
+담긴다. mempool 에 그보다 적으면 다음 블록에 자리가 있으니 바닥값
+(1000 lm = dust)이면 되고, 넘치면 담기는 마지막 자리보다 1 lm 높아야 한다.
+지갑은 이 값을 수수료 기본값으로 쓴다 — 예전에는 0.001 LIM 고정이었다.
+비트코인 코어의 `estimatesmartfee` 처럼 과거 블록을 보는 것은 아니고 지금
+mempool 만 본다.
+
 ### 폴링 비용
 
 지갑과 익스플로러는 `/info` 를 4초마다 부른다. 그 한 번에 UTxOut 집합과
@@ -517,6 +548,8 @@ log₂(n) 개의 해시만 있으면 된다.
 | `GET_HEADERS {locator}` → `HEADERS_RESPONSE {headers, height}` | locator 중 아는 첫 해시 다음부터 헤더 2000개 |
 | `GET_BLOCKS {locator}` → `BLOCKS_RESPONSE {blocks, height}` | 같은 자리부터 블록 500개 / 4MB |
 | `REQUEST_MEMPOOL` → `MEMPOOL_RESPONSE [tx]` | 대기 중인 트랜잭션 |
+| `HELLO {url}` | 내 공개 주소 (LIMCOIN_PUBLIC_URL 이 있을 때) |
+| `GET_PEERS` → `PEERS_RESPONSE {peers}` | 아는 피어 주소 (묻는 쪽 자기 것은 빼고) |
 
 익스플로러는 피어인 척 붙어 `BLOCKCHAIN_RESPONSE` 와 `MEMPOOL_RESPONSE` 만 듣는다.
 

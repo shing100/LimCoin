@@ -79,3 +79,69 @@ test("높이만 앞선 가짜 블록으로 체인이 바뀌지 않는다", () =>
   });
   assert.strictEqual(getBlockChain().length, before);
 });
+
+/* ------------------------------------------- 피어 발견 */
+
+const openSocket = () => ({
+  readyState: 1,
+  sent: [],
+  send(text) {
+    this.sent.push(JSON.parse(text));
+  }
+});
+
+test("HELLO 로 알려 준 주소를 기억하고, 우리 자신의 주소는 배우지 않는다", () => {
+  P2P.setPublicUrl("ws://me.example:3000");
+
+  const ws = openSocket();
+  P2P.handleMessage(ws, { type: "HELLO", data: { url: "ws://peer-a.example:3000" } });
+  assert.strictEqual(ws.advertisedUrl, "ws://peer-a.example:3000");
+  assert.ok(P2P.getKnownAddresses().includes("ws://peer-a.example:3000"));
+
+  P2P.handleMessage(openSocket(), { type: "HELLO", data: { url: "ws://me.example:3000" } });
+  assert.ok(!P2P.getKnownAddresses().includes("ws://me.example:3000"), "자기 자신은 배우지 않는다");
+
+  // 모양이 이상한 것은 무시한다
+  for (const data of [null, 1, {}, { url: 5 }, { url: "http://not-ws" }, { url: "ws://" }]) {
+    assert.doesNotThrow(() => P2P.handleMessage(openSocket(), { type: "HELLO", data }));
+  }
+});
+
+test("GET_PEERS 에 아는 주소를 주되, 묻는 쪽 자기 주소는 뺀다", () => {
+  const asker = openSocket();
+  P2P.handleMessage(asker, { type: "HELLO", data: { url: "ws://asker.example:3000" } });
+  P2P.handleMessage(asker, { type: "GET_PEERS" });
+
+  const reply = asker.sent[asker.sent.length - 1];
+  assert.strictEqual(reply.type, "PEERS_RESPONSE");
+  assert.ok(reply.data.peers.includes("ws://peer-a.example:3000"), "다른 피어는 알려 준다");
+  assert.ok(!reply.data.peers.includes("ws://asker.example:3000"), "묻는 쪽 자기 주소는 뺀다");
+  assert.ok(!reply.data.peers.includes("ws://me.example:3000"), "우리 주소도 뺀다 (이미 붙어 있으니)");
+});
+
+test("PEERS_RESPONSE 로 배운 주소에 outbound 상한까지 알아서 붙는다", () => {
+  // 실제로 소켓을 열지만 아무도 듣지 않는 포트라 바로 실패하고, 재연결 타이머는 unref 되어 있다
+  const learned = Array.from({ length: P2P.MAX_OUTBOUND + 3 }, (_, i) => `ws://127.0.0.1:${20000 + i}`);
+  P2P.handleMessage(openSocket(), { type: "PEERS_RESPONSE", data: { peers: learned } });
+
+  const dialed = P2P.getDialedPeers();
+  assert.ok(dialed.length <= P2P.MAX_OUTBOUND, `outbound 는 ${P2P.MAX_OUTBOUND} 개까지 (지금 ${dialed.length})`);
+  assert.ok(dialed.length > 0, "배운 주소에 붙기 시작해야 한다");
+  for (const url of learned) {
+    assert.ok(P2P.getKnownAddresses().includes(url), "붙지 않은 것도 알고는 있다");
+  }
+  // 정리: 더 이상 다시 걸지 않게
+  for (const url of dialed) {
+    P2P.disconnectPeer(url);
+  }
+});
+
+test("망가진 PEERS_RESPONSE / GET_PEERS 에도 죽지 않는다", () => {
+  for (const data of [null, 1, {}, { peers: "x" }, { peers: [null, 3, "ws://ok.example:1", "junk"] }]) {
+    assert.doesNotThrow(() => P2P.handleMessage(openSocket(), { type: "PEERS_RESPONSE", data }));
+  }
+  assert.doesNotThrow(() => P2P.handleMessage(openSocket(), { type: "GET_PEERS", data: 42 }));
+  for (const url of P2P.getDialedPeers()) {
+    P2P.disconnectPeer(url);
+  }
+});

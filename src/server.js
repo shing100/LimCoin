@@ -19,7 +19,7 @@ const {
 } = Blockchain;
 const { getTxFee } = Transactions;
 const { indexByOutpoint, indexByAddress } = require("./utxo");
-const { startP2PServer, connectToPeers, disconnectPeer, getPeers } = P2P;
+const { startP2PServer, setPublicUrl, connectToPeers, disconnectPeer, getPeers, getKnownAddresses } = P2P;
 const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance, getMnemonic, restoreFromMnemonic, GAP_LIMIT } = Wallet;
 const AddressIndexApi = require("./addressIndex");
 const { getMempool } = Mempool;
@@ -56,7 +56,7 @@ app.use(morgan("combined"));
 // X-Total-Count 는 단순 응답 헤더가 아니라서, 명시적으로 노출하지 않으면
 // 교차 출처에서 읽을 수 없다. 익스플로러의 페이지네이션이 이 값에 기댄다.
 const allowCors = cors({ exposedHeaders: ["X-Total-Count"] });
-const readOnly = ["/blocks", "/transactions", "/peers", "/address", "/info", "/search"];
+const readOnly = ["/blocks", "/transactions", "/peers", "/address", "/info", "/search", "/fees"];
 
 app.use((req, res, next) => {
   // 읽기 전용은 누구에게나 연다. 익스플로러가 붙어야 한다.
@@ -162,6 +162,11 @@ app.route("/blocks").get((req, res) => {
  * 피어가 못 붙게 하거나, 악성 피어에 붙여 놓을 수 있었다. 주소 형식은
  * connectToPeers 가 본다(ws:// 또는 wss://).
  */
+// 아는 주소 전부 (아직 붙지 않은 것 포함). 피어에게 배운 것이 여기 쌓인다.
+app.get("/peers/known", (req, res) => {
+  res.send(getKnownAddresses());
+});
+
 app.route("/peers")
   .get((req, res) => {
     res.send(getPeers());
@@ -514,8 +519,18 @@ app.get("/info", (req, res) => {
       (Math.floor(nextIndex / HALVING_INTERVAL) + 1) * HALVING_INTERVAL,
     maxTxsPerBlock: MAX_TXS_PER_BLOCK,
     coinbaseMaturity: COINBASE_MATURITY,
-    indexedAddresses: AddressIndex.getIndexedAddressCount()
+    indexedAddresses: AddressIndex.getIndexedAddressCount(),
+    // 지갑이 기본값으로 쓸 입력당 권장 수수료
+    recommendedFeePerInput: Mempool.estimateFee(getUTxOutList(), MAX_TXS_PER_BLOCK - 1).perInput
   });
+});
+
+/*
+ * 권장 수수료. mempool 이 다음 블록 자리(코인베이스 뺀 99건)보다 비어
+ * 있으면 바닥값, 넘치면 담기는 마지막 자리보다 조금 높은 값.
+ */
+app.get("/fees", (req, res) => {
+  res.send(Mempool.estimateFee(getUTxOutList(), MAX_TXS_PER_BLOCK - 1));
 });
 
 app.get("/address/:address", (req, res) => {
@@ -575,6 +590,21 @@ const start = (port = PORT, options = {}) => {
     console.log("LimCoin Server running ON", port)
   );
   startP2PServer(server);
+
+  /*
+   * 남이 나에게 걸 수 있는 주소. 피어에게 알려 주어 그들이 우리에게 붙거나
+   * 다른 피어에게 우리를 소개할 수 있게 한다.
+   *   LIMCOIN_PUBLIC_URL=ws://203.0.113.5:3000
+   * 없으면 남의 주소를 배우기만 하고 우리를 알리지는 못한다.
+   */
+  const publicUrl = options.publicUrl || process.env.LIMCOIN_PUBLIC_URL;
+  if (publicUrl) {
+    try {
+      setPublicUrl(publicUrl);
+    } catch (e) {
+      console.log(`LIMCOIN_PUBLIC_URL 이 올바르지 않습니다: ${e.message}`);
+    }
+  }
 
   if (AUTH_DISABLED) {
     console.log("경고: 지갑 인증이 꺼져 있습니다. 이 포트에 닿는 누구나 송금할 수 있습니다.");

@@ -162,3 +162,40 @@ test("pool 이 가득 차면 더 받지 않는다", () => {
   );
   Mempool.updateMempool([]);
 });
+
+/* ------------------------------------------- 권장 수수료 */
+
+test("다음 블록에 자리가 있으면 바닥값을 권한다", () => {
+  Mempool.updateMempool([]);
+  const estimate = Mempool.estimateFee([], 99);
+  assert.strictEqual(estimate.perInput, Mempool.MIN_FEE_PER_INPUT);
+  assert.strictEqual(estimate.congested, false);
+  assert.strictEqual(estimate.mempoolSize, 0);
+});
+
+test("자리가 꽉 차면 담기는 마지막 자리보다 조금 높은 값을 권한다", () => {
+  /*
+   * 블록 자리가 3건인데 mempool 에 수수료율 5, 3, 1 이 있다면 3건 모두
+   * 담긴다. 여기에 끼어들려면 마지막 자리(1)보다 높아야 한다.
+   * 자리가 2건이면 마지막 자리는 3 이다.
+   */
+  const owner = makeWallet();
+  const receiver = makeWallet();
+  const uTxOuts = [utxo(owner, "f1", 10 * COIN), utxo(owner, "f2", 10 * COIN), utxo(owner, "f3", 10 * COIN)];
+  Mempool.updateMempool([]);
+  for (const [id, fee] of [["f1", 50000], ["f2", 30000], ["f3", 10000]]) {
+    Mempool.addToMempool(
+      spend(owner, receiver.address, id, 10 * COIN, 1 * COIN, 9 * COIN - fee),
+      uTxOuts
+    );
+  }
+
+  const roomy = Mempool.estimateFee(uTxOuts, 99);
+  assert.strictEqual(roomy.congested, false, "99자리에 3건이면 널널하다");
+
+  const tight = Mempool.estimateFee(uTxOuts, 2);
+  assert.strictEqual(tight.congested, true);
+  assert.strictEqual(tight.perInput, 30001, "두 자리째(30000)를 밀어내려면 그보다 1 높아야 한다");
+  assert.strictEqual(tight.mempoolSize, 3);
+  Mempool.updateMempool([]);
+});
