@@ -56,6 +56,18 @@ const SYNC_REQUEST_TIMEOUT = 30000;
  */
 const MAX_HEADERS_PER_BATCH = 2000;
 const MAX_HEADER_BUFFER = 200000;
+/*
+ * 헤더를 받는 동안 들고 있는 것은 셋뿐이다.
+ *
+ *   - 마지막 몇 개의 헤더 (창). 다음 헤더를 검증하는 데 필요한 것은
+ *     난이도 계산(직전 10개)과 MTP(직전 11개)라 이만큼이면 된다.
+ *   - 누적 무게
+ *   - 받은 헤더의 해시 목록 (블록 단계에서 대조한다)
+ *
+ * 예전에는 갈라진 부분의 헤더 객체를 전부 배열로 들고 있었다. 새 노드가
+ * 10만 블록을 받으면 헤더만 40MB 쯤이 쌓였다. 해시만 남기면 그 1/3 이다.
+ */
+const HEADER_WINDOW = 32;
 
 /*
  * 우리가 건 피어들. 주소 -> { attempts, timer }
@@ -71,6 +83,23 @@ const dialedPeers = new Map();
 const RECONNECT_MIN = 1000;
 const RECONNECT_MAX = 60000;
 
+/*
+ * 피어 발견 (비트코인의 addr 교환).
+ *
+ * 지금까지는 피어 주소를 사람이 넣어 줘야 했다. 이제 붙으면 서로 자기
+ * 공개 주소를 알리고(HELLO), 아는 피어 목록을 주고받는다(GET_PEERS).
+ * 새로 알게 된 주소에는 outbound 상한까지 알아서 붙는다. 한 노드만 알고
+ * 시작해도 그물이 이어진다.
+ *
+ * 공개 주소는 스스로 알 수 없다 (inbound 연결에서 보이는 것은 상대의
+ * 임시 포트다). LIMCOIN_PUBLIC_URL 로 받는다. 없으면 남에게 자기를
+ * 알리지 못할 뿐, 남의 주소를 배우는 것은 된다.
+ */
+const MAX_OUTBOUND = 8;
+const MAX_KNOWN_ADDRESSES = 1000;
+let publicUrl = null;              // ws://내주소:포트
+const knownAddresses = new Set();  // 피어에게 배운 주소들
+
 // Message Type
 const GET_LATEST = "GET_LATEST";
 const GET_HEADERS = "GET_HEADERS";
@@ -80,6 +109,9 @@ const HEADERS_RESPONSE = "HEADERS_RESPONSE";
 const BLOCKS_RESPONSE = "BLOCKS_RESPONSE";
 const REQUEST_MEMPOOL = "REQUEST_MEMPOOL";
 const MEMPOOL_RESPONSE = "MEMPOOL_RESPONSE";
+const HELLO = "HELLO";
+const GET_PEERS = "GET_PEERS";
+const PEERS_RESPONSE = "PEERS_RESPONSE";
 
 // Message Creators
 const getLatest = () => {
@@ -145,6 +177,11 @@ const mempoolResponse = data => {
   };
 };
 
+// "나는 여기 있다" — 남이 나에게 걸 수 있는 주소
+const hello = url => ({ type: HELLO, data: { url } });
+const getPeersMessage = () => ({ type: GET_PEERS, data: null });
+const peersResponse = peers => ({ type: PEERS_RESPONSE, data: { peers } });
+
 // 소켓 가져오기
 const getSockets = () => sockets;
 
@@ -171,9 +208,13 @@ const initSocketConnection = ws => {
   handleSocketMessages(ws);
   handleSocketError(ws);
   sendMessage(ws, getLatest());
-  // 새로 붙은 피어에게만 mempool 을 요청한다
+  if (publicUrl !== null) {
+    sendMessage(ws, hello(publicUrl));
+  }
+  // 새로 붙은 피어에게만 mempool 과 피어 목록을 요청한다
   setTimeout(() => {
     sendMessage(ws, getAllMempool());
+    sendMessage(ws, getPeersMessage());
   }, 1000);
   // keepalive. 소켓이 닫히면 handleSocketError 에서 해제한다
   ws.keepAliveId = setInterval(() => {
@@ -269,8 +310,113 @@ const handleMessage = (ws, message) => {
         // 낱개로 넣으면 트랜잭션마다 UTxOut 집합을 복제하게 된다
         handleIncomingTxs(message.data);
         break;
+      case HELLO:
+        if(message.data === null || typeof message.data !== "object"){
+          break;
+        }
+        handleHello(ws, message.data.url);
+        break;
+      case GET_PEERS:
+        sendMessage(ws, peersResponse(addressesToShare(ws)));
+        break;
+      case PEERS_RESPONSE:
+        if(message.data === null || typeof message.data !== "object" || !Array.isArray(message.data.peers)){
+          break;
+        }
+        handlePeersResponse(message.data.peers);
+        break;
     }
 };
+
+/*
+ * 상대가 알려 준 자기 주소. 그 소켓에 붙여 두고, 아는 주소에도 넣는다.
+ * 우리 자신의 주소는 배우지 않는다.
+ */
+const handleHello = (ws, url) => {
+  if (!isPeerUrl(url) || url === publicUrl) {
+    return;
+  }
+  ws.advertisedUrl = url;
+  learnAddress(url);
+
+  /*
+   * 같은 상대와 두 번 붙어 있는가.
+   *
+   * 서로를 동시에 알게 되면 양쪽이 동시에 걸어 소켓이 둘이 된다 (우리가 건
+   * 것 + 상대가 건 것). 하나만 남긴다. 양쪽이 같은 규칙으로 정해야 둘 다
+   * 끊거나 둘 다 남기는 일이 없다: 공개 주소가 사전순으로 앞선 쪽이 자기가
+   * 건 것을 남긴다. 우리 공개 주소가 없으면 상대는 이 상황을 모르므로
+   * 우리가 건 것을 남기고 들어온 것을 끊는다.
+   */
+  const inbound = ws.peerUrl === undefined;
+  if (inbound && dialedPeers.has(url)) {
+    const keepOurs = publicUrl === null || publicUrl < url;
+    if (keepOurs) {
+      ws.close();
+    } else {
+      // 상대가 건 것을 남긴다. 주소는 잊지 않는다 — 끊기면 다시 걸 수 있게.
+      disconnectPeer(url);
+      knownAddresses.add(url);
+    }
+  }
+};
+
+const learnAddress = url => {
+  if (!isPeerUrl(url) || url === publicUrl || knownAddresses.has(url)) {
+    return false;
+  }
+  if (knownAddresses.size >= MAX_KNOWN_ADDRESSES) {
+    return false;
+  }
+  knownAddresses.add(url);
+  return true;
+};
+
+// 남에게 알려 줄 주소: 우리가 걸어 둔 것 + 상대가 알려 준 것. 묻는 쪽 자기 주소는 뺀다.
+const addressesToShare = ws => {
+  const urls = new Set(knownAddresses);
+  for (const url of dialedPeers.keys()) {
+    urls.add(url);
+  }
+  if (ws.advertisedUrl) {
+    urls.delete(ws.advertisedUrl);
+  }
+  if (publicUrl !== null) {
+    urls.delete(publicUrl);
+  }
+  return Array.from(urls).slice(0, 100);
+};
+
+/*
+ * 배운 주소 중 아직 붙지 않은 곳에 outbound 상한까지 붙는다.
+ * 상대가 보낸 목록은 남의 말이다 — 모양만 보고, 개수에 상한을 두고,
+ * 붙는 것도 상한까지만이다.
+ */
+const handlePeersResponse = peers => {
+  for (const url of peers.slice(0, 100)) {
+    learnAddress(url);
+  }
+  fillOutbound();
+};
+
+const fillOutbound = () => {
+  for (const url of knownAddresses) {
+    if (dialedPeers.size >= MAX_OUTBOUND || sockets.length >= MAX_PEERS) {
+      return;
+    }
+    if (dialedPeers.has(url) || isAlreadyConnected(url)) {
+      continue;
+    }
+    try {
+      connectToPeers(url);
+    } catch (e) {
+      // 상한 등. 다음에 다시 본다.
+    }
+  }
+};
+
+// 그 주소가 이미 inbound 로 붙어 있는가 (상대가 HELLO 로 알려 준 주소로)
+const isAlreadyConnected = url => sockets.some(ws => ws.advertisedUrl === url);
 
 const returnMempool = () => mempoolResponse(getMempool());
 
@@ -336,9 +482,9 @@ const buildLocator = sync => {
     } else if (sync.phase === "blocks" && sync.forkParent !== undefined) {
       // 헤더로 갈라진 지점을 알았다: 그 다음부터
       hashes.push(chain[sync.forkParent].hash);
-    } else if (sync.phase === "headers" && sync.headerChain !== null) {
+    } else if (sync.phase === "headers" && sync.headerHashes.length > 0) {
       // 헤더를 받는 중: 받은 마지막 헤더 다음부터
-      hashes.push(sync.headerChain[sync.headerChain.length - 1].hash);
+      hashes.push(sync.headerHashes[sync.headerHashes.length - 1]);
     }
   }
   let step = 1;
@@ -354,7 +500,9 @@ const buildLocator = sync => {
 
 const freshSyncState = () => ({
   phase: null,        // null | "headers" | "blocks"
-  headerChain: null,  // 갈라진 지점까지의 우리 체인 + 받아서 검증한 헤더들
+  window: null,       // 검증에 쓰는 마지막 HEADER_WINDOW 개 (우리 체인 끝 + 받은 헤더)
+  headerWork: 0,      // 갈라진 지점까지의 우리 체인 + 받은 헤더의 누적 무게
+  headerHashes: [],   // 받아서 검증한 헤더의 해시 (순서대로)
   forkParent: undefined,
   expected: null,     // 블록 단계에서 받아야 할 블록 해시들 (헤더에서)
   buffer: [],
@@ -431,8 +579,8 @@ const responseHeaders = locator => {
  * 받은 헤더를 검증하며 쌓는다. 다 받으면 무게를 재서 블록을 받을지 정한다.
  *
  * 검증에는 "이 헤더 앞에 오는 체인"이 필요하다 (난이도와 MTP 가 앞선 여러
- * 블록에서 나온다). 갈라진 지점까지의 우리 체인에 받은 헤더를 이어 붙인
- * headerChain 이 그것이다.
+ * 블록에서 나온다). 그 둘은 마지막 열 몇 개만 보므로 창(window)으로
+ * 충분하다 — 갈라진 지점까지의 우리 체인 끝에 받은 헤더를 이어 붙인다.
  */
 const handleHeadersResponse = (ws, data) => {
   const { headers, height } = data;
@@ -450,7 +598,7 @@ const handleHeadersResponse = (ws, data) => {
     return;
   }
 
-  if (sync.headerChain === null) {
+  if (sync.window === null) {
     // 첫 묶음. 우리 체인 어딘가에 붙어야 한다.
     const first = headers[0];
     if (first === null || typeof first !== "object" || typeof first.previousHash !== "string") {
@@ -462,20 +610,27 @@ const handleHeadersResponse = (ws, data) => {
       resetSync(ws, "받은 헤더가 우리 체인 어디에도 붙지 않습니다");
       return;
     }
+    const chain = getBlockChain();
     sync.forkParent = forkParent;
-    sync.headerChain = getBlockChain().slice(0, forkParent + 1);
+    sync.window = chain.slice(Math.max(0, forkParent + 1 - HEADER_WINDOW), forkParent + 1);
+    sync.headerWork = chainWork(chain.slice(0, forkParent + 1));
   }
 
   for (const header of headers) {
-    if (sync.headerChain.length - (sync.forkParent + 1) >= MAX_HEADER_BUFFER) {
+    if (sync.headerHashes.length >= MAX_HEADER_BUFFER) {
       resetSync(ws, `헤더가 ${MAX_HEADER_BUFFER} 개를 넘습니다`);
       return;
     }
-    if (!isHeaderValid(header, sync.headerChain)) {
+    if (!isHeaderValid(header, sync.window)) {
       resetSync(ws, `헤더 #${header && header.index} 이 검증에서 떨어졌습니다`);
       return;
     }
-    sync.headerChain.push(header);
+    sync.window.push(header);
+    if (sync.window.length > HEADER_WINDOW) {
+      sync.window.shift();
+    }
+    sync.headerWork += Math.pow(2, header.difficulty);
+    sync.headerHashes.push(header.hash);
   }
 
   const lastReceived = headers[headers.length - 1].index;
@@ -489,24 +644,25 @@ const handleHeadersResponse = (ws, data) => {
 // 헤더를 다 받았다. 우리보다 무거우면 그 블록들을 받기 시작한다.
 const finishHeaders = ws => {
   const sync = syncStateOf(ws);
-  if (sync.headerChain === null) {
+  if (sync.window === null) {
     resetSync(ws);
     return;
   }
-  const theirs = chainWork(sync.headerChain);
+  const theirs = sync.headerWork;
   const ours = chainWork(getBlockChain());
+  const theirHeight = sync.forkParent + sync.headerHashes.length;
   if (theirs <= ours) {
     resetSync(
       ws,
-      `받은 헤더 체인(높이 ${sync.headerChain.length - 1}, 무게 ${theirs})이 우리 것(높이 ${getBlockChain().length - 1}, 무게 ${ours})보다 무겁지 않습니다`
+      `받은 헤더 체인(높이 ${theirHeight}, 무게 ${theirs})이 우리 것(높이 ${getBlockChain().length - 1}, 무게 ${ours})보다 무겁지 않습니다`
     );
     return;
   }
   // 블록 단계. 받아야 할 것이 정확히 무엇인지 안다.
-  sync.expected = new Set(
-    sync.headerChain.slice(sync.forkParent + 1).map(header => header.hash)
-  );
-  sync.headerChain = null;
+  sync.expected = new Set(sync.headerHashes);
+  sync.window = null;
+  sync.headerHashes = [];
+  sync.headerWork = 0;
   sync.inFlight = false;
   requestBlocks(ws);
 };
@@ -720,7 +876,18 @@ const isPeerUrl = url => {
   }
 };
 
+// 남이 나에게 걸 수 있는 주소를 정한다. 뜰 때 한 번.
+const setPublicUrl = url => {
+  if (!isPeerUrl(url)) {
+    throw Error("공개 주소는 ws:// 또는 wss:// 여야 합니다");
+  }
+  publicUrl = url;
+};
+
 const connectToPeers = newPeer => {
+  if (newPeer === publicUrl) {
+    throw Error("자기 자신에게는 붙지 않습니다");
+  }
   if (!isPeerUrl(newPeer)) {
     throw Error("피어 주소는 ws:// 또는 wss:// 로 시작해야 합니다");
   }
@@ -760,9 +927,15 @@ const getPeers = () =>
     if (ws.peerUrl) {
       return ws.peerUrl;
     }
+    if (ws.advertisedUrl) {
+      return ws.advertisedUrl; // 상대가 알려 준 자기 주소
+    }
     const socket = ws._socket;
     return socket ? `${socket.remoteAddress}:${socket.remotePort}` : "unknown";
   });
+
+// 배웠지만 아직 붙지 않은 것까지 포함해, 아는 주소 전부
+const getKnownAddresses = () => Array.from(knownAddresses);
 
 module.exports = {
   // 테스트가 소켓 없이 메시지 처리를 부를 수 있게 열어 둔다
@@ -770,11 +943,15 @@ module.exports = {
   buildLocator,
   MAX_BLOCKS_PER_BATCH,
   MAX_HEADERS_PER_BATCH,
+  HEADER_WINDOW,
   startP2PServer,
+  setPublicUrl,
   connectToPeers,
   disconnectPeer,
   getDialedPeers,
+  getKnownAddresses,
   getPeers,
+  MAX_OUTBOUND,
   broadcastNewBlock,
   broadcastMempool
 };

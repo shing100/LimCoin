@@ -234,7 +234,50 @@ const selectTxsForBlock = (candidates, uTxOutList, limit, spendHeight) => {
   return selected;
 };
 
+/*
+ * 권장 수수료 (입력 하나당).
+ *
+ * 블록에는 코인베이스를 뺀 MAX_TXS_PER_BLOCK - 1 건이 들어가고, 수수료율
+ * (수수료 / 입력 수)이 높은 순으로 담긴다. mempool 에 그보다 적게 있으면
+ * 다음 블록에 자리가 있으므로 바닥값이면 된다. 그보다 많으면 담기는
+ * 마지막 자리의 수수료율보다 조금 높아야 한다.
+ *
+ * 지갑이 수수료를 사용자에게 통째로 맡기고 있었다. 비트코인 코어의
+ * estimatesmartfee 처럼 과거 블록을 보는 것은 아니고, 지금 mempool 만 본다.
+ */
+const MIN_FEE_PER_INPUT = 1000; // = dust. 이보다 작은 수수료는 의미가 없다
+
+const estimateFee = (uTxOutList, blockCapacity) => {
+  const sources = indexByOutpoint(uTxOutList);
+  for (const tx of mempool) {
+    tx.txOuts.forEach((txOut, index) => sources.set(keyOf(tx.id, index), txOut));
+  }
+  const rates = mempool
+    .map(tx => getTxFee(tx, sources) / Math.max(1, tx.txIns.length))
+    .sort((a, b) => b - a);
+
+  const roomLeft = blockCapacity - rates.length;
+  if (roomLeft > 0) {
+    return {
+      perInput: MIN_FEE_PER_INPUT,
+      congested: false,
+      mempoolSize: rates.length,
+      blockCapacity
+    };
+  }
+  // 담길 마지막 자리의 수수료율. 그보다 1 lm 만 높으면 그 자리를 밀어낸다.
+  const cutoff = rates[blockCapacity - 1];
+  return {
+    perInput: Math.max(MIN_FEE_PER_INPUT, Math.ceil(cutoff) + 1),
+    congested: true,
+    mempoolSize: rates.length,
+    blockCapacity
+  };
+};
+
 module.exports = {
+  estimateFee,
+  MIN_FEE_PER_INPUT,
   addToMempool,
   getSpendableUTxOuts,
   getMatureUTxOuts,

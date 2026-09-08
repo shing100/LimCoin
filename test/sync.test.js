@@ -12,6 +12,7 @@ const Blockchain = require("../src/blockchain");
 const { mineChainOnto, coinbaseBlockOnto } = require("./helpers");
 
 const { getBlockChain, getNewestBlock, addBlockToChain } = Blockchain;
+const HEADER_WINDOW = P2P.HEADER_WINDOW;
 const genesis = getBlockChain()[0];
 
 // 보낸 메시지를 모아 두는 가짜 소켓. readyState 1 = OPEN
@@ -312,4 +313,33 @@ test("빈 묶음이 오면 동기화를 마친다", () => {
   P2P.handleMessage(ws, { type: "BLOCKS_RESPONSE", data: { blocks: [], height: before.index } });
   assert.strictEqual(getNewestBlock().hash, before.hash);
   assert.strictEqual(ws.sent.length, 0);
+});
+
+test("창보다 긴 헤더 묶음도 끝까지 검증하고 받는다 (난이도 조정 지점을 지나며)", () => {
+  /*
+   * 헤더 단계는 마지막 HEADER_WINDOW 개만 들고 있다. 난이도 계산은 직전
+   * 10개, MTP 는 직전 11개를 보므로 그만큼이면 되는데, 창이 밀려나는
+   * 경계에서 틀어지면 여기서 걸린다. 난이도 조정 높이(10의 배수)를
+   * 적어도 하나 지나가게 한다.
+   */
+  const tip = getNewestBlock();
+  const count = HEADER_WINDOW + 3;
+  const theirs = mineChainOnto(tip, count, 300);
+  const headers = theirs.map(Blockchain.headerOf);
+
+  const ws = fakeSocket();
+  P2P.handleMessage(ws, { type: "BLOCKCHAIN_RESPONSE", data: [theirs[count - 1]], work: 1e18 });
+  assert.strictEqual(lastSent(ws).type, "GET_HEADERS");
+
+  // 두 묶음으로 나눠 준다
+  const half = Math.floor(count / 2);
+  P2P.handleMessage(ws, { type: "HEADERS_RESPONSE", data: { headers: headers.slice(0, half), height: theirs[count - 1].index } });
+  assert.strictEqual(lastSent(ws).type, "GET_HEADERS", "아직 상대 높이에 못 미쳤다");
+  assert.strictEqual(lastSent(ws).data.locator[0], headers[half - 1].hash, "받은 마지막 헤더 다음부터");
+
+  P2P.handleMessage(ws, { type: "HEADERS_RESPONSE", data: { headers: headers.slice(half), height: theirs[count - 1].index } });
+  assert.strictEqual(lastSent(ws).type, "GET_BLOCKS", "다 받아 무게가 더 크니 블록을 달라고 한다");
+
+  P2P.handleMessage(ws, { type: "BLOCKS_RESPONSE", data: { blocks: theirs, height: theirs[count - 1].index } });
+  assert.strictEqual(getNewestBlock().hash, theirs[count - 1].hash);
 });
