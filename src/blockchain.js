@@ -396,41 +396,83 @@ const getBlockHash = block => createHash(block.index, block.previousHash, block.
  * 셈이다.
  */
 const isBlockValid = (candidateBlock, chainSoFar) => {
-  const latestBlock = chainSoFar[chainSoFar.length - 1];
-  const expectedDifficulty = difficultyForNext(chainSoFar);
-
   if(!isBlockStructureValid(candidateBlock)){
     console.log('The candidate block structure is not valid');
     return false;
-  }else if(typeof candidateBlock.difficulty !== 'number' || candidateBlock.difficulty < MIN_DIFFICULTY){
-    console.log('The block difficulty is not valid');
+  }
+  if(!isHeaderValid(candidateBlock, chainSoFar)){
     return false;
-  }else if(candidateBlock.difficulty !== expectedDifficulty){
-    console.log(`The block difficulty ${candidateBlock.difficulty} is not the expected ${expectedDifficulty}`);
-    return false;
-  }else if(!PoW.hashMatchesDifficulty(candidateBlock.hash, candidateBlock.difficulty)){
-    console.log('The block hash does not meet the claimed difficulty');
-    return false;
-  }else if(latestBlock.index + 1 !== candidateBlock.index){
-    console.log('The block doesnt have a valid index')
-    return false;
-  }else if(latestBlock.hash !== candidateBlock.previousHash){
-    console.log('The previousHash of the candidate block is not the hash of the latest block');
-    return false;
-  }else if(getMerkleRoot(candidateBlock.data) !== candidateBlock.merkleRoot) {
+  }
+  if(getMerkleRoot(candidateBlock.data) !== candidateBlock.merkleRoot) {
     // 이 검사가 없으면 머클 루트는 장식일 뿐이다.
     // 헤더 해시는 맞는데 본문이 다른 블록을 걸러 낸다.
     console.log('The merkle root does not match the transactions in this block');
     return false;
-  }else if(getBlockHash(candidateBlock) !== candidateBlock.hash) {
+  }
+  return true;
+};
+
+/*
+ * 헤더만으로 할 수 있는 검증 — 본문(data)이 없어도 된다.
+ *
+ * 동기화할 때 헤더를 먼저 받아 이것으로 검증하고 무게를 비교한 뒤, 더
+ * 무거울 때만 블록을 받는다. 헤더는 한 개에 300바이트쯤이라 체인 전체를
+ * 받아도 부담이 작다. 머클 루트가 본문과 맞는지는 블록이 올 때 본다.
+ */
+const isHeaderValid = (header, chainSoFar) => {
+  const latestBlock = chainSoFar[chainSoFar.length - 1];
+  const expectedDifficulty = difficultyForNext(chainSoFar);
+
+  if(!isHeaderStructureValid(header)){
+    console.log('The header structure is not valid');
+    return false;
+  }else if(header.difficulty < MIN_DIFFICULTY){
+    console.log('The block difficulty is not valid');
+    return false;
+  }else if(header.difficulty !== expectedDifficulty){
+    console.log(`The block difficulty ${header.difficulty} is not the expected ${expectedDifficulty}`);
+    return false;
+  }else if(!PoW.hashMatchesDifficulty(header.hash, header.difficulty)){
+    console.log('The block hash does not meet the claimed difficulty');
+    return false;
+  }else if(latestBlock.index + 1 !== header.index){
+    console.log('The block doesnt have a valid index')
+    return false;
+  }else if(latestBlock.hash !== header.previousHash){
+    console.log('The previousHash of the candidate block is not the hash of the latest block');
+    return false;
+  }else if(getBlockHash(header) !== header.hash) {
     console.log('The hash of this block is invalid')
     return false;
-  }else if(!isTimeStampValid(candidateBlock, chainSoFar)) {
+  }else if(!isTimeStampValid(header, chainSoFar)) {
     console.log("The timestamp of this block is invalid");
     return false;
   }
   return true;
 };
+
+// 헤더 필드만 본다. 남이 보낸 것이므로 객체인지부터.
+const isHeaderStructureValid = header =>
+  header !== null &&
+  typeof header === "object" &&
+  typeof header.index === 'number' &&
+  typeof header.hash === 'string' &&
+  typeof header.previousHash === 'string' &&
+  typeof header.timestamp === 'number' &&
+  typeof header.merkleRoot === 'string' &&
+  typeof header.difficulty === 'number' &&
+  typeof header.nonce === 'number';
+
+// 블록에서 헤더만 떼어 낸다 (본문 없이 보낼 때)
+const headerOf = block => ({
+  index: block.index,
+  hash: block.hash,
+  previousHash: block.previousHash,
+  timestamp: block.timestamp,
+  merkleRoot: block.merkleRoot,
+  difficulty: block.difficulty,
+  nonce: block.nonce
+});
 
 // 블록 유효성 체크
 const isBlockStructureValid = (block) => {
@@ -553,11 +595,14 @@ const isChainValid = (candidateChain) => {
     return { chain, uTxOuts: working, undo, common, uTxOutsAtCommon };
 };
 // 난이도 구분하기
-const sumDifficulty = anyBlockchain =>
+// 체인의 무게. 난이도 d 인 블록은 평균 2^d 번 해시해야 나오므로 그만큼 일한 것이다.
+// 헤더만 있어도 셀 수 있다 — 동기화 때 블록을 받기 전에 비교하는 데 쓴다.
+const chainWork = anyBlockchain =>
   anyBlockchain
     .map(block => block.difficulty)
     .map(difficulty => Math.pow(2,difficulty))
     .reduce((a,b) => a + b, 0);
+const sumDifficulty = chainWork;
 // 블록체인 재배치
 const replaceChain = candidateChain => {
   const validated = isChainValid(candidateChain);
@@ -956,6 +1001,10 @@ module.exports = {
   medianTimePast,
   MAX_FUTURE_BLOCK_TIME,
   isBlockValid,
+  isHeaderValid,
+  isHeaderStructureValid,
+  headerOf,
+  chainWork,
   addBlockToChain,
   isBlockStructureValid,
   getNewestBlock,

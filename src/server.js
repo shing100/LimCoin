@@ -19,7 +19,7 @@ const {
 } = Blockchain;
 const { getTxFee } = Transactions;
 const { indexByOutpoint, indexByAddress } = require("./utxo");
-const { startP2PServer, connectToPeers, getPeers } = P2P;
+const { startP2PServer, connectToPeers, disconnectPeer, getPeers } = P2P;
 const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance, getMnemonic, restoreFromMnemonic, GAP_LIMIT } = Wallet;
 const AddressIndexApi = require("./addressIndex");
 const { getMempool } = Mempool;
@@ -177,6 +177,15 @@ app.route("/peers")
     } catch (e) {
       res.status(400).send(e.message);
     }
+  })
+  // 걸어 둔 피어를 잊는다. 끊기면 다시 거는 것도 멈춘다.
+  .delete(requireWalletAuth, (req, res) => {
+    const { body: { peer } } = req;
+    if (!disconnectPeer(peer)) {
+      res.status(404).send("우리가 걸어 둔 피어가 아닙니다");
+      return;
+    }
+    res.send();
   });
 
 /*
@@ -576,6 +585,23 @@ const start = (port = PORT, options = {}) => {
 
   if (process.env.LIMCOIN_MINE === "1" || options.mine) {
     Miner.start();
+  }
+
+  /*
+   * 뜰 때 붙을 피어들. 쉼표로 여러 개.
+   *   LIMCOIN_PEERS=ws://a:3000,ws://b:3000
+   * 붙지 못하면 간격을 늘리며 계속 다시 건다 — 상대가 나중에 떠도 된다.
+   */
+  const peers = (options.peers || process.env.LIMCOIN_PEERS || "")
+    .split(",")
+    .map(peer => peer.trim())
+    .filter(peer => peer !== "");
+  for (const peer of peers) {
+    try {
+      connectToPeers(peer);
+    } catch (e) {
+      console.log(`피어 ${peer} 에 붙지 못합니다: ${e.message}`);
+    }
   }
 
   return server;

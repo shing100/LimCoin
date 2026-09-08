@@ -7,7 +7,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { findAmountInUTxOuts } = require("../src/wallet");
+const { findAmountInUTxOuts, findExactMatch, DUST } = require("../src/wallet");
 const { COIN } = require("../src/units");
 
 const u = (id, amount) => ({ txOutId: id, txOutIndex: 0, address: "a", amount });
@@ -47,4 +47,45 @@ test("원본 배열을 건드리지 않는다", () => {
   const snapshot = pool.map(x => x.txOutId);
   findAmountInUTxOuts(6 * COIN, pool);
   assert.deepStrictEqual(pool.map(x => x.txOutId), snapshot, "정렬은 복사본에서 해야 한다");
+});
+
+/* ------------------------------------------- 잔돈 없는 조합 (Branch and Bound) */
+
+test("정확히 채우는 조합이 있으면 그것을 써서 잔돈을 없앤다", () => {
+  // 7 은 하나로 안 된다. 4 + 3 = 7 이 정확히 맞는다. 큰 것부터 담으면 5 + 4 = 9 (잔돈 2).
+  const pool = [u("a", 5 * COIN), u("b", 4 * COIN), u("c", 3 * COIN)];
+  const { includedUTxOuts, leftOverAmount } = findAmountInUTxOuts(7 * COIN, pool);
+
+  assert.deepStrictEqual(includedUTxOuts.map(x => x.txOutId).sort(), ["b", "c"]);
+  assert.strictEqual(leftOverAmount, 0);
+});
+
+test("하나로 되는 것이 있어도 정확한 조합이 우선이다", () => {
+  const pool = [u("big", 10 * COIN), u("x", 2 * COIN), u("y", 1 * COIN)];
+  const { includedUTxOuts, leftOverAmount } = findAmountInUTxOuts(3 * COIN, pool);
+  assert.deepStrictEqual(includedUTxOuts.map(x => x.txOutId).sort(), ["x", "y"]);
+  assert.strictEqual(leftOverAmount, 0);
+});
+
+test("dust 이내로 넘치는 조합도 정확한 것으로 친다", () => {
+  const pool = [u("a", 5 * COIN), u("b", 3 * COIN + DUST - 1)];
+  const { includedUTxOuts, leftOverAmount } = findAmountInUTxOuts(3 * COIN, pool);
+  assert.deepStrictEqual(includedUTxOuts.map(x => x.txOutId), ["b"]);
+  assert.strictEqual(leftOverAmount, DUST - 1, "이 잔돈은 출력이 되지 않고 수수료로 간다");
+});
+
+test("남은 것을 다 넣어도 모자라는 갈래는 접는다 — 시도 횟수 상한 안에서 끝난다", () => {
+  // 서로 다른 값 60개, 어느 조합으로도 정확히 안 되는 목표
+  const pool = Array.from({ length: 60 }, (_, i) => u(`u${i}`, (i + 1) * 1000 * COIN + 7));
+  const started = Date.now();
+  assert.strictEqual(findExactMatch(3, pool, 0), null);
+  assert.ok(Date.now() - started < 2000, "탐색이 폭발하면 안 된다");
+});
+
+test("정확한 조합이 없으면 예전 규칙(하나 → 큰 것부터)으로 간다", () => {
+  const pool = [u("a", 5 * COIN), u("b", 4 * COIN)];
+  // 6: 정확히 안 됨, 하나로 안 됨 → 5 + 4
+  const { includedUTxOuts, leftOverAmount } = findAmountInUTxOuts(6 * COIN, pool);
+  assert.deepStrictEqual(includedUTxOuts.map(x => x.txOutId), ["a", "b"]);
+  assert.strictEqual(leftOverAmount, 3 * COIN);
 });

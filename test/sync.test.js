@@ -94,7 +94,7 @@ test("망가진 GET_BLOCKS 에도 죽지 않는다", () => {
 
 /* ------------------------------------------- 클라이언트 쪽: 뒤처졌을 때 */
 
-test("앞선 블록 소식이 우리 끝에 이어지지 않으면 그 피어에게 조각을 달라고 한다", () => {
+test("이어지지 않는 소식은 먼저 헤더를 달라고 한다 (블록이 아니라)", () => {
   const tip = getNewestBlock();
   // 우리보다 두 블록 앞선 어떤 블록 (previousHash 가 우리 것이 아님)
   const farAhead = { ...coinbaseBlockOnto(tip, undefined, 50), index: tip.index + 2, previousHash: "모름" };
@@ -103,12 +103,123 @@ test("앞선 블록 소식이 우리 끝에 이어지지 않으면 그 피어에
   P2P.handleMessage(ws, { type: "BLOCKCHAIN_RESPONSE", data: [farAhead] });
 
   const request = lastSent(ws);
-  assert.strictEqual(request.type, "GET_BLOCKS", "예전에는 GET_ALL 을 모두에게 보냈다");
+  assert.strictEqual(request.type, "GET_HEADERS", "예전에는 GET_ALL 을 모두에게, 그다음엔 GET_BLOCKS 를 보냈다");
   assert.ok(Array.isArray(request.data.locator));
   assert.strictEqual(request.data.locator[0], tip.hash, "우리 끝 해시가 맨 앞");
   // 같은 피어에게 두 번 겹쳐 요청하지 않는다
   P2P.handleMessage(ws, { type: "BLOCKCHAIN_RESPONSE", data: [farAhead] });
-  assert.strictEqual(ws.sent.filter(m => m.type === "GET_BLOCKS").length, 1);
+  assert.strictEqual(ws.sent.filter(m => m.type === "GET_HEADERS").length, 1);
+});
+
+test("더 짧아도 더 무겁다고 하면 헤더를 달라고 한다", () => {
+  /*
+   * 예전에는 높이로만 판단해서, 더 짧지만 난이도가 높은 체인은 소식을
+   * 들어도 받지 않았다. 체인을 고르는 기준은 높이가 아니라 무게다.
+   */
+  const chain = getBlockChain();
+  const ours = Blockchain.chainWork(chain);
+  const shorter = { ...chain[Math.max(1, chain.length - 2)], hash: "다른체인의끝", previousHash: "모름" };
+
+  const ws = fakeSocket();
+  P2P.handleMessage(ws, { type: "BLOCKCHAIN_RESPONSE", data: [shorter], work: ours + 1 });
+  assert.strictEqual(lastSent(ws).type, "GET_HEADERS");
+
+  // 무겁지 않다고 하면 (그리고 높이도 낮으면) 아무것도 하지 않는다
+  const ws2 = fakeSocket();
+  P2P.handleMessage(ws2, { type: "BLOCKCHAIN_RESPONSE", data: [shorter], work: ours - 1 });
+  assert.strictEqual(ws2.sent.length, 0);
+});
+
+/* ------------------------------------------- 헤더 단계 */
+
+test("GET_HEADERS 는 본문 없는 헤더를 준다", () => {
+  const chain = getBlockChain();
+  const ws = fakeSocket();
+  P2P.handleMessage(ws, { type: "GET_HEADERS", data: { locator: [genesis.hash] } });
+  const reply = lastSent(ws);
+
+  assert.strictEqual(reply.type, "HEADERS_RESPONSE");
+  assert.strictEqual(reply.data.height, chain.length - 1);
+  assert.strictEqual(reply.data.headers.length, chain.length - 1);
+  for (const header of reply.data.headers) {
+    assert.strictEqual(header.data, undefined, "본문은 없어야 한다");
+    assert.strictEqual(typeof header.hash, "string");
+    assert.strictEqual(typeof header.nonce, "number");
+  }
+});
+
+test("헤더를 다 받아 더 무거우면 그 블록들을 달라고 한다", () => {
+  const tip = getNewestBlock();
+  const theirs = mineChainOnto(tip, 2, 100);
+  const headers = theirs.map(Blockchain.headerOf);
+
+  const ws = fakeSocket();
+  // 소식 → GET_HEADERS
+  P2P.handleMessage(ws, { type: "BLOCKCHAIN_RESPONSE", data: [theirs[1]], work: Blockchain.chainWork(getBlockChain()) + 100 });
+  assert.strictEqual(lastSent(ws).type, "GET_HEADERS");
+
+  // 헤더 응답 → 무게 비교 → GET_BLOCKS (갈라진 지점 = 우리 끝 다음부터)
+  P2P.handleMessage(ws, { type: "HEADERS_RESPONSE", data: { headers, height: theirs[1].index } });
+  const request = lastSent(ws);
+  assert.strictEqual(request.type, "GET_BLOCKS");
+  assert.strictEqual(request.data.locator[0], tip.hash);
+  assert.strictEqual(getNewestBlock().hash, tip.hash, "블록을 받기 전이라 체인은 그대로");
+
+  // 블록 응답 → 붙는다
+  P2P.handleMessage(ws, { type: "BLOCKS_RESPONSE", data: { blocks: theirs, height: theirs[1].index } });
+  assert.strictEqual(getNewestBlock().hash, theirs[1].hash);
+});
+
+test("헤더 체인이 우리보다 무겁지 않으면 블록을 받지 않는다", () => {
+  const chain = getBlockChain();
+  const fork = chain[chain.length - 2];
+  // 우리 끝과 같은 높이의 다른 블록 하나 — 무게가 같다
+  const rival = coinbaseBlockOnto(fork, undefined, 110);
+
+  const ws = fakeSocket();
+  P2P.handleMessage(ws, { type: "BLOCKCHAIN_RESPONSE", data: [rival], work: Blockchain.chainWork(chain) + 1 });
+  assert.strictEqual(lastSent(ws).type, "GET_HEADERS", "말로는 무겁다고 했으니 헤더는 받아 본다");
+  P2P.handleMessage(ws, { type: "HEADERS_RESPONSE", data: { headers: [Blockchain.headerOf(rival)], height: rival.index } });
+
+  assert.strictEqual(ws.sent.filter(m => m.type === "GET_BLOCKS").length, 0, "직접 재 보니 무겁지 않다");
+  assert.strictEqual(getNewestBlock().hash, chain[chain.length - 1].hash);
+});
+
+test("작업증명이 틀린 헤더는 받자마자 버린다", () => {
+  const tip = getNewestBlock();
+  const good = coinbaseBlockOnto(tip, undefined, 120);
+  const forged = { ...Blockchain.headerOf(good), nonce: good.nonce + 1 }; // 해시가 안 맞는다
+
+  // 소식은 우리 끝에 바로 이어지지 않는 것이어야 헤더 단계로 간다
+  const news = { ...good, index: good.index + 1, previousHash: "모름" };
+
+  const ws = fakeSocket();
+  P2P.handleMessage(ws, { type: "BLOCKCHAIN_RESPONSE", data: [news], work: 1e18 });
+  assert.strictEqual(lastSent(ws).type, "GET_HEADERS");
+  P2P.handleMessage(ws, { type: "HEADERS_RESPONSE", data: { headers: [forged], height: good.index } });
+
+  assert.strictEqual(ws.sent.filter(m => m.type === "GET_BLOCKS").length, 0);
+  assert.strictEqual(getNewestBlock().hash, tip.hash);
+  // 동기화 상태가 초기화되어 다음 소식에 다시 헤더를 달라고 할 수 있다
+  P2P.handleMessage(ws, { type: "BLOCKCHAIN_RESPONSE", data: [news], work: 1e18 });
+  assert.strictEqual(ws.sent.filter(m => m.type === "GET_HEADERS").length, 2);
+});
+
+test("헤더에서 보지 못한 블록이 오면 버린다", () => {
+  const tip = getNewestBlock();
+  const announced = mineChainOnto(tip, 2, 130);
+  const other = mineChainOnto(tip, 2, 140); // 같은 높이의 다른 블록들
+
+  const ws = fakeSocket();
+  P2P.handleMessage(ws, { type: "BLOCKCHAIN_RESPONSE", data: [announced[1]], work: 1e18 });
+  P2P.handleMessage(ws, {
+    type: "HEADERS_RESPONSE",
+    data: { headers: announced.map(Blockchain.headerOf), height: announced[1].index }
+  });
+  assert.strictEqual(lastSent(ws).type, "GET_BLOCKS");
+
+  P2P.handleMessage(ws, { type: "BLOCKS_RESPONSE", data: { blocks: other, height: other[1].index } });
+  assert.strictEqual(getNewestBlock().hash, tip.hash, "헤더와 다른 블록은 붙이지 않는다");
 });
 
 test("우리 끝에 이어지는 묶음은 하나씩 바로 붙이고, 끝까지 받았으면 알린다", () => {

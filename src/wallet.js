@@ -291,7 +291,71 @@ const getWalletBalance = uTxOuts => {
  * 비트코인 코어는 여기에 "잔돈이 안 남는 조합"을 찾는 탐색(Branch and Bound)
  * 을 먼저 한다. 그건 다음 일이다.
  */
+/*
+ * 이보다 작은 출력은 만들지 않는다 (dust).
+ *
+ * 여기서 수수료율은 입력 수로 재므로, 어떤 출력이든 나중에 쓸 때 입력
+ * 하나 값을 낸다. 그 값에도 못 미치는 잔돈은 있으나 없으나 같고,
+ * UTxOut 집합만 불린다. 잔돈이 이보다 작으면 출력을 만들지 않고 수수료로
+ * 넘긴다 — 비트코인의 dust 정책과 같다. 1000 lm = 0.00001 LIM.
+ */
+const DUST = 1000;
+
+/*
+ * 정확히(dust 이내로) 채우는 조합을 찾는다 (Branch and Bound).
+ *
+ * 그런 조합이 있으면 잔돈 출력이 필요 없다. 트랜잭션이 작아지고 UTxOut
+ * 하나가 덜 생기며, 어느 출력이 잔돈인지 밖에서 알아볼 수도 없다.
+ * 비트코인 코어가 코인 선택 맨 앞에 두는 단계다.
+ *
+ * 큰 것부터 넣어 보며 깊이 우선으로 훑는다. 남은 것을 다 넣어도 모자라면
+ * 그 갈래는 바로 접고(bound), 시도 횟수에 상한을 두어 출력이 많아도
+ * 시간이 튀지 않게 한다. 못 찾으면 null — 그때는 예전 방식으로 간다.
+ */
+const BNB_MAX_TRIES = 100000;
+
+const findExactMatch = (target, utxos, tolerance) => {
+  const sorted = [...utxos].sort((a, b) => b.amount - a.amount);
+  // 뒤쪽 남은 합 (bound 에 쓴다)
+  const remaining = new Array(sorted.length + 1).fill(0);
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    remaining[i] = remaining[i + 1] + sorted[i].amount;
+  }
+
+  let tries = 0;
+  const chosen = [];
+  const search = (index, sum) => {
+    if (sum >= target && sum <= target + tolerance) {
+      return true;
+    }
+    if (sum > target + tolerance || index >= sorted.length) {
+      return false;
+    }
+    if (sum + remaining[index] < target) {
+      return false; // 남은 것을 다 넣어도 모자란다
+    }
+    if (++tries > BNB_MAX_TRIES) {
+      return false;
+    }
+    chosen.push(sorted[index]);
+    if (search(index + 1, sum + sorted[index].amount)) {
+      return true;
+    }
+    chosen.pop();
+    return search(index + 1, sum);
+  };
+
+  return search(0, 0) ? chosen.slice() : null;
+};
+
 const findAmountInUTxOuts = (amountNeeded, myUTxOuts) => {
+  const exact = findExactMatch(amountNeeded, myUTxOuts, DUST - 1);
+  if (exact !== null) {
+    const total = exact.reduce((sum, uTxOut) => sum + uTxOut.amount, 0);
+    // dust 미만의 초과분은 잔돈 출력을 만들지 않고 수수료로 넘어간다
+    return { includedUTxOuts: exact, leftOverAmount: total - amountNeeded };
+  }
+
   const single = myUTxOuts
     .filter(uTxOut => uTxOut.amount >= amountNeeded)
     .sort((a, b) => a.amount - b.amount)[0];
@@ -324,7 +388,8 @@ const filterUTxOutsFromMempool = (uTxOutList, mempool) => {
 
 const createTxOuts = (receiverAddress, changeAddress, amount, leftOverAmount) => {
   const receiverTxOut = new TxOut(receiverAddress, amount);
-  if (leftOverAmount === 0) {
+  // dust 미만의 잔돈은 출력으로 만들지 않는다. 그 몫은 수수료가 된다.
+  if (leftOverAmount < DUST) {
     return [receiverTxOut];
   }
   return [receiverTxOut, new TxOut(changeAddress, leftOverAmount)];
@@ -347,6 +412,10 @@ const createTx = (receiverAddress, amount, uTxOutList, memPool, fee = 0) => {
   if (!Number.isInteger(fee) || fee < 0) {
     throw Error("수수료는 최소 단위 기준 0 이상의 정수여야 합니다");
   }
+  if (amount < DUST) {
+    // 받는 쪽이 나중에 쓸 때 드는 값에도 못 미치는 출력이다
+    throw Error(`보내는 금액은 최소 ${DUST} lm 이상이어야 합니다 (dust)`);
+  }
 
   const keyByAddress = new Map(getAllKeys().map(key => [key.address, key.privateKey]));
   const myUTxOuts = uTxOutList.filter(uTxOut => keyByAddress.has(uTxOut.address));
@@ -363,7 +432,7 @@ const createTx = (receiverAddress, amount, uTxOutList, memPool, fee = 0) => {
   });
 
   // 거스름돈이 있을 때만 새 주소를 쓴다. 자리를 먼저 확보하고 만든다.
-  const changeAddress = leftOverAmount > 0 ? getChangeAddress() : null;
+  const changeAddress = leftOverAmount >= DUST ? getChangeAddress() : null;
   tx.txOuts = createTxOuts(receiverAddress, changeAddress, amount, leftOverAmount);
 
   tx.id = getTxId(tx);
@@ -386,6 +455,8 @@ module.exports = {
   restoreFromMnemonic,
   reload,
   findAmountInUTxOuts,
+  findExactMatch,
+  DUST,
   GAP_LIMIT,
   getAllKeys,
   getAddresses,

@@ -5,7 +5,7 @@ const WebSockets = require('ws'),
 
 const {
   getNewestBlock, isBlockStructureValid, replaceChain, getBlockChain,
-  addBlockToChain, handleIncomingTxs
+  addBlockToChain, handleIncomingTxs, isHeaderValid, headerOf, chainWork
 } = Blockchain;
 
 const { getMempool } = Mempool;
@@ -42,14 +42,41 @@ const MAX_SYNC_BUFFER = 20000;
 // 요청해 놓고 이만큼 응답이 없으면 다시 요청할 수 있게 한다
 const SYNC_REQUEST_TIMEOUT = 30000;
 
-// 이미 붙은 피어에 또 연결하지 않도록 주소를 기억한다.
-// 예전에는 같은 피어에 connectToPeers 를 여러 번 부르면 소켓이 계속 쌓였다.
-const dialedPeers = new Set();
+/*
+ * 블록보다 헤더를 먼저 받는다 (headers-first).
+ *
+ * 예전에는 "상대 끝 블록의 높이가 우리보다 크면" 동기화를 시작했다. 그러면
+ * 더 짧지만 더 무거운 체인(난이도가 높은)은 소식을 들어도 받지 않는다.
+ * 체인을 고르는 기준은 높이가 아니라 일한 양(무게)이다 — 백서 4장.
+ *
+ * 헤더는 본문 없는 블록이라 300바이트쯤이다. 헤더만 먼저 받아 검증하고
+ * (작업증명, 난이도, 타임스탬프, 연결) 무게를 잰 뒤, 우리 것보다 무거울
+ * 때만 블록을 받는다. 무겁지 않은 체인에 블록을 내려받는 값을 쓰지 않고,
+ * 받는 블록이 미리 받아 둔 헤더와 다르면 바로 알아본다.
+ */
+const MAX_HEADERS_PER_BATCH = 2000;
+const MAX_HEADER_BUFFER = 200000;
+
+/*
+ * 우리가 건 피어들. 주소 -> { attempts, timer }
+ *
+ * 이미 붙은 피어에 또 연결하지 않도록 기억한다 (예전에는 같은 피어에
+ * connectToPeers 를 여러 번 부르면 소켓이 계속 쌓였다).
+ *
+ * 끊기면 다시 건다. 예전에는 한 번 끊기면 그걸로 끝이었다 — 상대가
+ * 재시작하는 동안 우리는 조용히 혼자가 됐다. 상대가 죽어 있는 동안
+ * 연결 시도로 도배하지 않도록 실패할 때마다 간격을 두 배로 늘린다.
+ */
+const dialedPeers = new Map();
+const RECONNECT_MIN = 1000;
+const RECONNECT_MAX = 60000;
 
 // Message Type
 const GET_LATEST = "GET_LATEST";
+const GET_HEADERS = "GET_HEADERS";
 const GET_BLOCKS = "GET_BLOCKS";
 const BLOCKCHAIN_RESPONSE = "BLOCKCHAIN_RESPONSE";
+const HEADERS_RESPONSE = "HEADERS_RESPONSE";
 const BLOCKS_RESPONSE = "BLOCKS_RESPONSE";
 const REQUEST_MEMPOOL = "REQUEST_MEMPOOL";
 const MEMPOOL_RESPONSE = "MEMPOOL_RESPONSE";
@@ -70,12 +97,32 @@ const getBlocks = locator => {
   };
 };
 
+const getHeaders = locator => {
+  return {
+    type: GET_HEADERS,
+    data: { locator }
+  };
+};
+
+/*
+ * 블록 소식. 우리 체인의 무게를 함께 실어 상대가 받을지 말지 정하게 한다.
+ * 익스플로러는 data 만 읽으므로 옆에 붙인 것은 지나친다.
+ * 무게는 말일 뿐이다 — 받는 쪽은 헤더를 받아 직접 잰다.
+ */
 const blockchainResponse = (data) => {
   return {
     type: BLOCKCHAIN_RESPONSE,
-    data
+    data,
+    work: chainWork(getBlockChain())
   }
 }
+
+const headersResponse = (headers, height) => {
+  return {
+    type: HEADERS_RESPONSE,
+    data: { headers, height }
+  };
+};
 
 const blocksResponse = (blocks, height) => {
   return {
@@ -181,6 +228,12 @@ const handleMessage = (ws, message) => {
       case GET_LATEST:
         sendMessage(ws, responseLatest());  // 가장 최근
         break;
+      case GET_HEADERS:
+        if(message.data === null || typeof message.data !== "object"){
+          break;
+        }
+        sendMessage(ws, responseHeaders(message.data.locator));
+        break;
       case GET_BLOCKS:
         if(message.data === null || typeof message.data !== "object"){
           break;
@@ -192,7 +245,13 @@ const handleMessage = (ws, message) => {
           console.log("BLOCKCHAIN_RESPONSE 의 본문이 블록 배열이 아닙니다");
           break;
         }
-        handleBlockchainResponse(ws, message.data);
+        handleBlockchainResponse(ws, message.data, message.work);
+        break;
+      case HEADERS_RESPONSE:
+        if(message.data === null || typeof message.data !== "object"){
+          break;
+        }
+        handleHeadersResponse(ws, message.data);
         break;
       case BLOCKS_RESPONSE:
         if(message.data === null || typeof message.data !== "object"){
@@ -223,7 +282,7 @@ const returnMempool = () => mempoolResponse(getMempool());
  * 갈라진 것이다 — 그 피어에게 조각으로 달라고 한다.
  * 예전에는 이때 모든 피어에게 체인 전체를 달라고 했다.
  */
-const handleBlockchainResponse = (ws, receivedBlocks) => {
+const handleBlockchainResponse = (ws, receivedBlocks, claimedWork) => {
   if(receivedBlocks.length === 0){
     console.log("Received blocks have a length of 0");
     return;
@@ -234,14 +293,25 @@ const handleBlockchainResponse = (ws, receivedBlocks) => {
     return;
   }
   const newestBlock = getNewestBlock();
-  if(latestBlockReceived.index > newestBlock.index){
-    if(newestBlock.hash === latestBlockReceived.previousHash){
-      if(addBlockToChain(latestBlockReceived)) {
-        broadcastNewBlock();
-      }
-    }else{
-      requestBlocks(ws);
+  if (latestBlockReceived.hash === newestBlock.hash) {
+    return; // 우리와 같은 끝이다
+  }
+  if(newestBlock.hash === latestBlockReceived.previousHash){
+    if(addBlockToChain(latestBlockReceived)) {
+      broadcastNewBlock();
     }
+    return;
+  }
+  /*
+   * 이어지지 않는데 상대가 더 무겁다고 한다 — 뒤처졌거나 갈라진 것이다.
+   * 무게를 알려 주지 않는 상대에게는 예전처럼 높이로 짐작한다.
+   */
+  const heavier =
+    typeof claimedWork === "number"
+      ? claimedWork > chainWork(getBlockChain())
+      : latestBlockReceived.index > newestBlock.index;
+  if (heavier) {
+    requestHeaders(ws);
   }
 };
 
@@ -258,10 +328,19 @@ const handleBlockchainResponse = (ws, receivedBlocks) => {
  */
 const buildLocator = sync => {
   const hashes = [];
-  if (sync && sync.buffer.length > 0) {
-    hashes.push(sync.buffer[sync.buffer.length - 1].hash);
-  }
   const chain = getBlockChain();
+  if (sync) {
+    if (sync.buffer.length > 0) {
+      // 블록을 받는 중: 받은 마지막 블록 다음부터
+      hashes.push(sync.buffer[sync.buffer.length - 1].hash);
+    } else if (sync.phase === "blocks" && sync.forkParent !== undefined) {
+      // 헤더로 갈라진 지점을 알았다: 그 다음부터
+      hashes.push(chain[sync.forkParent].hash);
+    } else if (sync.phase === "headers" && sync.headerChain !== null) {
+      // 헤더를 받는 중: 받은 마지막 헤더 다음부터
+      hashes.push(sync.headerChain[sync.headerChain.length - 1].hash);
+    }
+  }
   let step = 1;
   for (let height = chain.length - 1; height > 0; height -= step) {
     hashes.push(chain[height].hash);
@@ -273,21 +352,163 @@ const buildLocator = sync => {
   return hashes;
 };
 
+const freshSyncState = () => ({
+  phase: null,        // null | "headers" | "blocks"
+  headerChain: null,  // 갈라진 지점까지의 우리 체인 + 받아서 검증한 헤더들
+  forkParent: undefined,
+  expected: null,     // 블록 단계에서 받아야 할 블록 해시들 (헤더에서)
+  buffer: [],
+  inFlight: false,
+  requestedAt: 0,
+  progressed: false
+});
+
 const syncStateOf = ws => {
   if (!ws.sync) {
-    ws.sync = { buffer: [], inFlight: false, requestedAt: 0, progressed: false };
+    ws.sync = freshSyncState();
   }
   return ws.sync;
 };
 
+const isStale = sync =>
+  sync.inFlight && Date.now() - sync.requestedAt >= SYNC_REQUEST_TIMEOUT;
+
+const requestHeaders = ws => {
+  let sync = syncStateOf(ws);
+  if (sync.phase === "blocks" && !isStale(sync)) {
+    return; // 이미 블록을 받는 중이다. 끝나면 새 소식은 다시 온다.
+  }
+  if (isStale(sync)) {
+    resetSync(ws, "응답이 없어 처음부터 다시 합니다");
+    sync = syncStateOf(ws);
+  }
+  if (sync.inFlight) {
+    return;
+  }
+  sync.phase = "headers";
+  sync.inFlight = true;
+  sync.requestedAt = Date.now();
+  sendMessage(ws, getHeaders(buildLocator(sync)));
+};
+
 const requestBlocks = ws => {
   const sync = syncStateOf(ws);
-  if (sync.inFlight && Date.now() - sync.requestedAt < SYNC_REQUEST_TIMEOUT) {
+  if (sync.inFlight && !isStale(sync)) {
     return; // 이미 달라고 해 놨다
   }
+  sync.phase = "blocks";
   sync.inFlight = true;
   sync.requestedAt = Date.now();
   sendMessage(ws, getBlocks(buildLocator(sync)));
+};
+
+// locator 중 우리도 아는 첫 해시의 다음 높이. 하나도 모르면 제네시스(0).
+const startAfterLocator = locator => {
+  if (!Array.isArray(locator)) {
+    return 0;
+  }
+  for (const hash of locator) {
+    if (typeof hash !== "string") {
+      continue;
+    }
+    const height = ChainIndex.findBlockHeight(hash);
+    if (height !== undefined) {
+      return height + 1;
+    }
+  }
+  return 0;
+};
+
+// GET_HEADERS 에 답한다. 헤더는 작으므로 개수만 본다.
+const responseHeaders = locator => {
+  const chain = getBlockChain();
+  const start = startAfterLocator(locator);
+  const headers = chain.slice(start, start + MAX_HEADERS_PER_BATCH).map(headerOf);
+  return headersResponse(headers, chain.length - 1);
+};
+
+/*
+ * 받은 헤더를 검증하며 쌓는다. 다 받으면 무게를 재서 블록을 받을지 정한다.
+ *
+ * 검증에는 "이 헤더 앞에 오는 체인"이 필요하다 (난이도와 MTP 가 앞선 여러
+ * 블록에서 나온다). 갈라진 지점까지의 우리 체인에 받은 헤더를 이어 붙인
+ * headerChain 이 그것이다.
+ */
+const handleHeadersResponse = (ws, data) => {
+  const { headers, height } = data;
+  if (!Array.isArray(headers)) {
+    return;
+  }
+  const sync = syncStateOf(ws);
+  if (sync.phase !== "headers") {
+    return; // 달라고 한 적 없다
+  }
+  sync.inFlight = false;
+
+  if (headers.length === 0) {
+    finishHeaders(ws);
+    return;
+  }
+
+  if (sync.headerChain === null) {
+    // 첫 묶음. 우리 체인 어딘가에 붙어야 한다.
+    const first = headers[0];
+    if (first === null || typeof first !== "object" || typeof first.previousHash !== "string") {
+      resetSync(ws, "받은 헤더의 모양이 맞지 않습니다");
+      return;
+    }
+    const forkParent = ChainIndex.findBlockHeight(first.previousHash);
+    if (forkParent === undefined) {
+      resetSync(ws, "받은 헤더가 우리 체인 어디에도 붙지 않습니다");
+      return;
+    }
+    sync.forkParent = forkParent;
+    sync.headerChain = getBlockChain().slice(0, forkParent + 1);
+  }
+
+  for (const header of headers) {
+    if (sync.headerChain.length - (sync.forkParent + 1) >= MAX_HEADER_BUFFER) {
+      resetSync(ws, `헤더가 ${MAX_HEADER_BUFFER} 개를 넘습니다`);
+      return;
+    }
+    if (!isHeaderValid(header, sync.headerChain)) {
+      resetSync(ws, `헤더 #${header && header.index} 이 검증에서 떨어졌습니다`);
+      return;
+    }
+    sync.headerChain.push(header);
+  }
+
+  const lastReceived = headers[headers.length - 1].index;
+  if (typeof height === "number" && lastReceived >= height) {
+    finishHeaders(ws);
+    return;
+  }
+  requestHeaders(ws);
+};
+
+// 헤더를 다 받았다. 우리보다 무거우면 그 블록들을 받기 시작한다.
+const finishHeaders = ws => {
+  const sync = syncStateOf(ws);
+  if (sync.headerChain === null) {
+    resetSync(ws);
+    return;
+  }
+  const theirs = chainWork(sync.headerChain);
+  const ours = chainWork(getBlockChain());
+  if (theirs <= ours) {
+    resetSync(
+      ws,
+      `받은 헤더 체인(높이 ${sync.headerChain.length - 1}, 무게 ${theirs})이 우리 것(높이 ${getBlockChain().length - 1}, 무게 ${ours})보다 무겁지 않습니다`
+    );
+    return;
+  }
+  // 블록 단계. 받아야 할 것이 정확히 무엇인지 안다.
+  sync.expected = new Set(
+    sync.headerChain.slice(sync.forkParent + 1).map(header => header.hash)
+  );
+  sync.headerChain = null;
+  sync.inFlight = false;
+  requestBlocks(ws);
 };
 
 /*
@@ -297,19 +518,7 @@ const requestBlocks = ws => {
  */
 const responseBlocks = locator => {
   const chain = getBlockChain();
-  let start = 0;
-  if (Array.isArray(locator)) {
-    for (const hash of locator) {
-      if (typeof hash !== "string") {
-        continue;
-      }
-      const height = ChainIndex.findBlockHeight(hash);
-      if (height !== undefined) {
-        start = height + 1;
-        break;
-      }
-    }
-  }
+  const start = startAfterLocator(locator);
 
   const blocks = [];
   let bytes = 0;
@@ -325,13 +534,10 @@ const responseBlocks = locator => {
 };
 
 const resetSync = (ws, reason) => {
-  const sync = syncStateOf(ws);
   if (reason) {
     console.log(`동기화를 중단합니다: ${reason}`);
   }
-  sync.buffer = [];
-  sync.inFlight = false;
-  sync.progressed = false;
+  ws.sync = freshSyncState();
 };
 
 // 한 묶음 안에서 모양이 맞고 서로 이어지는지
@@ -356,6 +562,11 @@ const handleBlocksResponse = (ws, data) => {
   }
   if (!isBatchWellFormed(blocks)) {
     resetSync(ws, "받은 묶음이 서로 이어지지 않습니다");
+    return;
+  }
+  // 헤더를 먼저 받았다면, 그때 본 블록만 받는다
+  if (sync.expected !== null && !blocks.every(block => sync.expected.has(block.hash))) {
+    resetSync(ws, "헤더에 없던 블록이 왔습니다");
     return;
   }
 
@@ -412,8 +623,7 @@ const finishSync = ws => {
   if (sync.progressed) {
     broadcastNewBlock();
   }
-  sync.progressed = false;
-  sync.inFlight = false;
+  ws.sync = freshSyncState();
 };
 
 // JSON 메세지 보내기 to WS
@@ -440,17 +650,58 @@ const broadcastMempool = () => sendMessageToAll(returnMempool());
 const handleSocketError = ws => {
   const closeSocketConnetion = ws => {
     clearInterval(ws.keepAliveId);
-    if (ws.peerUrl) {
-      dialedPeers.delete(ws.peerUrl);
-    }
     ws.close();
     const index = sockets.indexOf(ws);
     if (index !== -1) {
       sockets.splice(index, 1);
     }
+    // 우리가 건 연결이면 다시 건다 (connectToPeers 의 close 핸들러가 한다)
   };
   ws.on("error", () => closeSocketConnetion(ws));
   ws.on("close", () => closeSocketConnetion(ws));
+};
+
+const scheduleReconnect = url => {
+  const peer = dialedPeers.get(url);
+  if (!peer || peer.timer !== null) {
+    return; // 잊힌 피어거나 이미 걸어 둔 재연결이 있다
+  }
+  const delay = Math.min(RECONNECT_MIN * Math.pow(2, peer.attempts), RECONNECT_MAX);
+  peer.attempts++;
+  peer.timer = setTimeout(() => {
+    peer.timer = null;
+    dial(url);
+  }, delay);
+  peer.timer.unref();
+};
+
+const dial = url => {
+  const peer = dialedPeers.get(url);
+  if (!peer) {
+    return;
+  }
+  if (sockets.length >= MAX_PEERS) {
+    scheduleReconnect(url);
+    return;
+  }
+  const ws = new WebSockets(url, { maxPayload: MAX_MESSAGE_BYTES });
+  ws.peerUrl = url;
+  peer.socket = ws;
+
+  ws.on("open", () => {
+    peer.attempts = 0; // 붙었다. 다음에 끊기면 짧게부터 다시 시작한다.
+    initSocketConnection(ws);
+  });
+  // error 뒤에는 close 가 이어지므로 재연결은 close 에서만 건다
+  ws.on("error", () => {
+    console.log(`피어에 연결하지 못했습니다: ${url}`);
+  });
+  ws.on("close", () => {
+    peer.socket = null;
+    if (dialedPeers.has(url)) {
+      scheduleReconnect(url);
+    }
+  });
 };
 
 /*
@@ -480,23 +731,28 @@ const connectToPeers = newPeer => {
   if (sockets.length >= MAX_PEERS) {
     throw Error(`피어 수 상한(${MAX_PEERS})에 도달했습니다`);
   }
-
-  const ws = new WebSockets(newPeer, { maxPayload: MAX_MESSAGE_BYTES });
-  dialedPeers.add(newPeer);
-  ws.peerUrl = newPeer;
-
-  ws.on("open", () => {
-      initSocketConnection(ws);
-  });
-  ws.on("error", () => {
-    console.log("Connection failed");
-    dialedPeers.delete(newPeer);
-  });
-  ws.on("close", () => {
-    console.log("Connection closed");
-    dialedPeers.delete(newPeer);
-  });
+  dialedPeers.set(newPeer, { attempts: 0, timer: null, socket: null });
+  dial(newPeer);
 };
+
+// 이 피어를 잊는다. 재연결도 멈춘다.
+const disconnectPeer = url => {
+  const peer = dialedPeers.get(url);
+  if (!peer) {
+    return false;
+  }
+  dialedPeers.delete(url);
+  if (peer.timer !== null) {
+    clearTimeout(peer.timer);
+  }
+  if (peer.socket !== null) {
+    peer.socket.close();
+  }
+  return true;
+};
+
+// 우리가 걸어 둔 피어 주소들 (지금 붙어 있든 다시 거는 중이든)
+const getDialedPeers = () => Array.from(dialedPeers.keys());
 
 // 연결된 피어 주소 목록
 const getPeers = () =>
@@ -513,8 +769,11 @@ module.exports = {
   handleMessage,
   buildLocator,
   MAX_BLOCKS_PER_BATCH,
+  MAX_HEADERS_PER_BATCH,
   startP2PServer,
   connectToPeers,
+  disconnectPeer,
+  getDialedPeers,
   getPeers,
   broadcastNewBlock,
   broadcastMempool
