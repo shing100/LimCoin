@@ -191,6 +191,61 @@ test("갈라진 체인으로 갈아 끼워도 UTxOut 과 주소 색인이 재생
   }
 });
 
+/* ------------------------------------------- 타임스탬프 규칙 */
+
+const { medianTimePast, MAX_FUTURE_BLOCK_TIME, isBlockValid } = Blockchain;
+
+test("MTP 는 직전 11블록 타임스탬프의 중앙값이다", () => {
+  const chain = t => ({ timestamp: t });
+
+  // 홀수 개면 가운데 값
+  assert.strictEqual(medianTimePast([chain(30), chain(10), chain(20)]), 20);
+  // 11개를 넘으면 뒤에서 11개만 본다
+  const many = Array.from({ length: 20 }, (_, i) => chain(i));
+  assert.strictEqual(medianTimePast(many), 14, "9..19 의 중앙값");
+  // 순서가 뒤죽박죽이어도 중앙값이다
+  assert.strictEqual(medianTimePast([chain(100), chain(1), chain(50)]), 50);
+});
+
+test("MTP 이하로 시간을 되돌린 블록은 거부된다", () => {
+  /*
+   * 난이도는 타임스탬프 차이로 정해진다(timeTaken = 최신 - 10블록 전).
+   * 시간을 뒤로 밀면 timeTaken 이 커져 난이도가 내려간다. 예전 규칙은
+   * 직전 블록보다 60초 이전까지 허용해서 그게 가능했다.
+   */
+  const chain = getBlockChain();
+  const tip = chain[chain.length - 1];
+  const mtp = medianTimePast(chain);
+
+  const stale = mineOnto(tip, [createCoinbaseTx(newAddress(), tip.index + 1, 0)], 0);
+  stale.timestamp = mtp; // 중앙값과 같게 (하한은 "보다 커야" 한다)
+  stale.merkleRoot = getMerkleRoot(stale.data);
+  const found = PoW.findNonce({ ...stale, previousHash: tip.hash }, 0, 500000);
+  stale.nonce = found.nonce;
+  stale.hash = found.hash;
+
+  assert.strictEqual(isBlockValid(stale, chain), false);
+});
+
+test("2시간 넘게 미래인 블록은 거부되고, 1시간은 받아들인다", () => {
+  /*
+   * 예전에는 미래로 60초까지만 허용했다. 노드 사이 시계가 조금만
+   * 어긋나도 정직한 블록이 거부되고, 그것만으로 체인이 갈라진다.
+   */
+  const chain = getBlockChain();
+  const tip = chain[chain.length - 1];
+
+  const at = seconds => {
+    const block = mineOnto(tip, [createCoinbaseTx(newAddress(), tip.index + 1, 0)], 0);
+    block.timestamp = Math.round(Date.now() / 1000) + seconds;
+    const found = PoW.findNonce({ ...block, previousHash: tip.hash }, 0, 500000);
+    return { ...block, nonce: found.nonce, hash: found.hash };
+  };
+
+  assert.strictEqual(isBlockValid(at(MAX_FUTURE_BLOCK_TIME + 600), chain), false);
+  assert.strictEqual(isBlockValid(at(3600), chain), true, "1시간은 시계 오차 범위다");
+});
+
 /* ------------------------------------------- 작업증명 위조 */
 
 test("난이도는 그 높이에서 프로토콜이 정한 값이어야 한다", () => {

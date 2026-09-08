@@ -51,6 +51,14 @@ let cache = null;
 const seedOf = wallet =>
   wallet.mnemonic ? BIP39.mnemonicToSeed(wallet.mnemonic) : wallet.seed;
 
+/*
+ * 캐시를 버린다. 지갑 파일이 밖에서 바뀐 경우에 쓴다.
+ * (테스트가 파일을 직접 갈아 끼우고 다시 읽게 할 때 필요하다)
+ */
+const reload = () => {
+  cache = null;
+};
+
 const readWallet = () => {
   if (cache !== null) {
     return cache;
@@ -60,9 +68,25 @@ const readWallet = () => {
   return cache;
 };
 
+/*
+ * 지갑 파일에는 니모닉이 평문으로 들어간다. 그 24단어면 이 지갑의 모든
+ * 코인을 가져갈 수 있다. 기본 권한(0644)으로 두면 같은 기계의 다른
+ * 사용자가 그냥 읽을 수 있으므로 주인만 읽고 쓰게 한다.
+ *
+ * 이미 있는 파일은 writeFileSync 의 mode 가 적용되지 않으므로 따로 맞춘다.
+ */
+const WALLET_MODE = 0o600;
+
 const writeWallet = wallet => {
   cache = { wallet, seed: seedOf(wallet) };
-  fs.writeFileSync(walletLocation(), JSON.stringify(wallet, null, 2) + "\n");
+  fs.writeFileSync(walletLocation(), JSON.stringify(wallet, null, 2) + "\n", {
+    mode: WALLET_MODE
+  });
+  try {
+    fs.chmodSync(walletLocation(), WALLET_MODE);
+  } catch (e) {
+    // 권한 개념이 없는 파일 시스템(윈도우 등)이면 넘어간다
+  }
 };
 
 /**
@@ -215,13 +239,21 @@ const restoreFromMnemonic = (mnemonic, isUsed) => {
     return used;
   };
 
+  /*
+   * 예전 형식 키로 받아 둔 코인은 니모닉으로 되살릴 수 없다. 씨앗에서
+   * 나온 키가 아니기 때문이다. 예전에는 복구할 때 imported 를 [] 로
+   * 덮어써서 그 코인을 통째로 잃었다. 있던 것은 그대로 둔다.
+   */
+  const imported = fs.existsSync(walletLocation()) ? readWallet().wallet.imported || [] : [];
+
   const wallet = {
     version: WALLET_VERSION,
-    mnemonic: BIP39.mnemonicToEntropy(mnemonic) && mnemonic.normalize("NFKD").trim().split(/\s+/).join(" "),
+    // 단어 사이 공백과 유니코드 표기를 한 가지로 맞춘다 (BIP39 는 NFKD 를 쓴다)
+    mnemonic: mnemonic.normalize("NFKD").trim().split(/\s+/).join(" "),
     // 받는 주소는 최소 하나 있어야 쓸 수 있다
     nextReceive: Math.max(1, scan(HD.RECEIVE)),
     nextChange: scan(HD.CHANGE),
-    imported: []
+    imported
   };
   writeWallet(wallet);
   return { receive: wallet.nextReceive, change: wallet.nextChange };
@@ -330,6 +362,7 @@ module.exports = {
   getWallet,
   getMnemonic,
   restoreFromMnemonic,
+  reload,
   GAP_LIMIT,
   getAllKeys,
   getAddresses,

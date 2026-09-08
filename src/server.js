@@ -13,7 +13,8 @@ const express = require("express"),
     crypto = require("crypto");
 
 const {
-  getBlockChain, createNewBlock, getAccountBalance, getSpendableBalance, sendTx, getUTxOutList,
+  getBlockChain, createNewBlock, getAccountBalance, getSpendableBalance,
+  getImmatureBalance, sendTx, getUTxOutList, persistMempool,
   getTxProof, getNewestBlock, initChain, getBlockByHash, findTx
 } = Blockchain;
 const { getTxFee } = Transactions;
@@ -24,7 +25,7 @@ const AddressIndexApi = require("./addressIndex");
 const { getMempool } = Mempool;
 const {
   isAddressValid, getBlockSubsidy, getTotalSupply,
-  HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK
+  HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK, COINBASE_MATURITY
 } = Transactions;
 const { COIN, DECIMALS } = require("./units");
 
@@ -133,8 +134,16 @@ app.route("/blocks").get((req, res) => {
   const chain = getBlockChain();
   const limit = clampInt(req.query.limit, DEFAULT_PAGE, MAX_PAGE);
   const offset = clampInt(req.query.offset, 0, Number.MAX_SAFE_INTEGER);
-  // 최신 블록이 앞으로 오게 뒤집어 잘라 준다
-  const page = chain.slice().reverse().slice(offset, offset + limit);
+  /*
+   * 최신 블록이 앞으로 오게 잘라 준다.
+   *
+   * 예전에는 체인을 통째로 복사해 뒤집은 다음 잘랐다. 익스플로러가
+   * 4초마다 부르는 자리에서 체인 길이에 비례하는 값을 낼 이유가 없다.
+   * 필요한 구간만 끝에서 떼어 뒤집는다.
+   */
+  const end = Math.max(0, chain.length - offset);
+  const start = Math.max(0, end - limit);
+  const page = chain.slice(start, end).reverse();
   res.set("X-Total-Count", String(chain.length));
   res.send(page);
 }).post(requireWalletAuth, async (req, res) => {
@@ -173,7 +182,10 @@ app.route("/peers")
 app.get("/me/balance", requireWalletAuth, (req, res) => {
   res.send({
     balance: getAccountBalance(),
-    spendable: getSpendableBalance()
+    spendable: getSpendableBalance(),
+    // 아직 묻히지 않아 쓸 수 없는 채굴 보상
+    immature: getImmatureBalance(),
+    coinbaseMaturity: COINBASE_MATURITY
   });
 });
 
@@ -484,6 +496,7 @@ app.get("/info", (req, res) => {
     nextHalvingAtHeight:
       (Math.floor(nextIndex / HALVING_INTERVAL) + 1) * HALVING_INTERVAL,
     maxTxsPerBlock: MAX_TXS_PER_BLOCK,
+    coinbaseMaturity: COINBASE_MATURITY,
     indexedAddresses: AddressIndex.getIndexedAddressCount()
   });
 });
@@ -560,9 +573,37 @@ const start = (port = PORT, options = {}) => {
   return server;
 };
 
+/*
+ * 종료할 때 mempool 을 남긴다.
+ *
+ * 아직 블록에 담기지 않은 트랜잭션은 메모리에만 있다. 그냥 죽으면
+ * 보낸 사람은 영문도 모른 채 다시 보내야 한다. 채굴 워커도 함께
+ * 정리해야 프로세스가 매달리지 않는다.
+ *
+ * kill -9 는 어쩔 수 없다 — 비트코인 코어도 마찬가지다.
+ */
+let shuttingDown = false;
+const shutdown = async signal => {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  console.log(`\n${signal} 를 받았습니다. 정리하고 종료합니다.`);
+  try {
+    await Miner.stop();
+    persistMempool();
+  } catch (e) {
+    console.log(`종료 정리 중 문제가 있었습니다: ${e.message}`);
+  }
+  process.exit(0);
+};
+
 // `node src/server.js` 로 직접 실행할 때만 자동으로 띄운다.
 if (require.main === module) {
   start();
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, () => shutdown(signal));
+  }
 }
 
-module.exports = { app, start, connectToPeers, WALLET_TOKEN };
+module.exports = { app, start, shutdown, connectToPeers, WALLET_TOKEN };

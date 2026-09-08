@@ -24,17 +24,37 @@ const {
   collectConsumed,
   rollbackTxs,
   sumBlockFees,
+  isSpendable,
+  COINBASE_MATURITY,
   MAX_TXS_PER_BLOCK
 } = Transactions;
 
 const {
-  addToMempool, getMempool, updateMempool, selectTxsForBlock, getSpendableUTxOuts
+  addToMempool, getMempool, updateMempool, selectTxsForBlock,
+  getSpendableUTxOuts, getMatureUTxOuts
 } = Mempool;
 const { indexByOutpoint } = require("./utxo");
 
 const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기
 const DIFFICULTY_ADJUSMENT_INTERVAL = 10; // 난이도 조정 주기
-const TIMESTAMP_MINIT = 60;
+/*
+ * 타임스탬프 규칙. 비트코인과 같은 방식이다.
+ *
+ * 예전에는 "직전 블록 -60초 이후, 그리고 내 시계 +60초 이내" 였다.
+ * 두 가지가 잘못돼 있었다.
+ *
+ *  - 뒤로 60초까지 갈 수 있었다. 난이도는 타임스탬프 차이로 정해지므로
+ *    (timeTaken = 최신 - 10블록 전) 시간을 뒤로 밀면 timeTaken 이 커져
+ *    난이도가 내려간다. 블록을 조작해 난이도를 낮출 수 있었다.
+ *  - 미래로는 60초까지만 허용했다. 노드 사이 시계가 조금만 어긋나도
+ *    정직한 블록이 거부된다 — 그것만으로 체인이 갈라진다.
+ *
+ * 이제 직전 11블록 타임스탬프의 중앙값(MTP)보다 커야 하고, 내 시계보다
+ * 2시간 넘게 앞서면 안 된다. 중앙값이라 과반을 쥐지 않으면 시간을 뒤로
+ * 밀 수 없고, 2시간은 시계 오차를 넉넉히 덮는다.
+ */
+const MEDIAN_TIME_SPAN = 11;
+const MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60;
 const MIN_DIFFICULTY = 1; // 0 이면 어떤 해시든 통과해 버린다
 
 /*
@@ -92,6 +112,9 @@ ChainIndex.applyBlock(genesisBlock);
  */
 let undoLog = [collectConsumed(genesisBlock.data, [])];
 
+// 다음 블록이 붙을 높이. 성숙도 검사의 기준이 된다.
+const nextHeight = () => getNewestBlock().index + 1;
+
 // 새로운 블록 가져오기
 const getNewestBlock = () => blockchain[blockchain.length - 1];
 
@@ -112,7 +135,8 @@ const createNewBlock = async () => {
   const selected = selectTxsForBlock(
     getMempool(),
     snapshot,
-    MAX_TXS_PER_BLOCK - 1
+    MAX_TXS_PER_BLOCK - 1,
+    nextIndex
   );
   /*
    * 수수료는 담기는 순서대로 세어야 한다. 앞선 트랜잭션이 만든 출력을
@@ -131,7 +155,12 @@ const createNewBlock = async () => {
 const createNewRawBlock = async data => {
   const previousBlock = getNewestBlock();
   const newBlockIndex = previousBlock.index + 1;
-  const newTimestamp = getTimestamp();
+  /*
+   * MTP 보다 커야 한다. 블록이 몇 초 안에 여러 개 나오면 시계가 같은
+   * 초를 가리켜 중앙값이 지금과 같아질 수 있으므로, 그때는 한 칸 민다.
+   * (비트코인 코어의 GetMinimumTime 과 같은 처리다)
+   */
+  const newTimestamp = Math.max(getTimestamp(), medianTimePast(blockchain) + 1);
   const difficulty = findDifficulty();
   const mining = findBlockInWorkers(
     newBlockIndex,
@@ -330,9 +359,18 @@ const findBlockInWorkers = (index, previousHash, timestamp, data, difficulty) =>
 };
 
 // 타임스탬프 유효성 검사
-const isTimeStampValid = (newBlock, oldBlock) => {
-  return (oldBlock.timestamp - TIMESTAMP_MINIT < newBlock.timestamp && newBlock.timestamp - TIMESTAMP_MINIT < getTimestamp())
-}
+// 직전 MEDIAN_TIME_SPAN 블록 타임스탬프의 중앙값
+const medianTimePast = chain => {
+  const recent = chain
+    .slice(-MEDIAN_TIME_SPAN)
+    .map(block => block.timestamp)
+    .sort((a, b) => a - b);
+  return recent[Math.floor(recent.length / 2)];
+};
+
+const isTimeStampValid = (newBlock, chainSoFar) =>
+  newBlock.timestamp > medianTimePast(chainSoFar) &&
+  newBlock.timestamp <= getTimestamp() + MAX_FUTURE_BLOCK_TIME;
 // 헤시 만들기
 const getBlockHash = block => createHash(block.index, block.previousHash, block.timestamp, block.merkleRoot, block.difficulty, block.nonce);
 
@@ -342,8 +380,11 @@ const getBlockHash = block => createHash(block.index, block.previousHash, block.
 /*
  * 블록 유효성.
  *
- * expectedDifficulty 는 이 높이에서 프로토콜이 요구하는 난이도다.
- * 두 가지를 함께 봐야 작업증명이 성립한다.
+ * chainSoFar 는 이 블록 앞에 오는 체인이다. 난이도와 타임스탬프 하한
+ * (MTP)이 둘 다 한 블록이 아니라 앞선 여러 블록에서 나오므로, 직전
+ * 블록 하나만으로는 검증할 수 없다.
+ *
+ * 작업증명은 두 가지를 함께 봐야 성립한다.
  *
  *   1. 블록이 내건 난이도가 프로토콜이 정한 값과 같은가
  *   2. 해시가 실제로 그 난이도를 만족하는가
@@ -354,14 +395,17 @@ const getBlockHash = block => createHash(block.index, block.previousHash, block.
  * 정직한 체인을 단번에 넘어섰다. 일 한 번 안 하고 체인을 갈아 끼울 수 있는
  * 셈이다.
  */
-const isBlockValid = (candidateBlock, latestBlock, expectedDifficulty) => {
+const isBlockValid = (candidateBlock, chainSoFar) => {
+  const latestBlock = chainSoFar[chainSoFar.length - 1];
+  const expectedDifficulty = difficultyForNext(chainSoFar);
+
   if(!isBlockStructureValid(candidateBlock)){
     console.log('The candidate block structure is not valid');
     return false;
   }else if(typeof candidateBlock.difficulty !== 'number' || candidateBlock.difficulty < MIN_DIFFICULTY){
     console.log('The block difficulty is not valid');
     return false;
-  }else if(expectedDifficulty !== undefined && candidateBlock.difficulty !== expectedDifficulty){
+  }else if(candidateBlock.difficulty !== expectedDifficulty){
     console.log(`The block difficulty ${candidateBlock.difficulty} is not the expected ${expectedDifficulty}`);
     return false;
   }else if(!PoW.hashMatchesDifficulty(candidateBlock.hash, candidateBlock.difficulty)){
@@ -381,7 +425,7 @@ const isBlockValid = (candidateBlock, latestBlock, expectedDifficulty) => {
   }else if(getBlockHash(candidateBlock) !== candidateBlock.hash) {
     console.log('The hash of this block is invalid')
     return false;
-  }else if(!isTimeStampValid(candidateBlock, latestBlock)) {
+  }else if(!isTimeStampValid(candidateBlock, chainSoFar)) {
     console.log("The timestamp of this block is invalid");
     return false;
   }
@@ -390,6 +434,10 @@ const isBlockValid = (candidateBlock, latestBlock, expectedDifficulty) => {
 
 // 블록 유효성 체크
 const isBlockStructureValid = (block) => {
+  // 남이 보낸 것이므로 객체인지부터 본다. 숫자나 null 이 올 수 있다.
+  if (block === null || typeof block !== "object") {
+    return false;
+  }
   return (
     typeof block.index === 'number' &&
     typeof block.hash === 'string' &&
@@ -479,7 +527,7 @@ const isChainValid = (candidateChain) => {
       working = [];
       for (let i = 0; i < common; i++) {
         undo[i] = collectConsumed(chain[i].data, working);
-        working = updateUTxOuts(chain[i].data, working);
+        working = updateUTxOuts(chain[i].data, working, chain[i].index);
       }
     }
     // 주소 색인을 갈라진 지점부터 다시 쌓을 때 시작점이 된다
@@ -487,7 +535,7 @@ const isChainValid = (candidateChain) => {
 
     for(let i = common; i < candidateChain.length; i++){
       const currentBlock = candidateChain[i];
-      if(i !== 0 && !isBlockValid(currentBlock, candidateChain[i-1], difficultyForNext(chain))){
+      if(i !== 0 && !isBlockValid(currentBlock, chain)){
         return null;
       }
 
@@ -543,7 +591,7 @@ const replaceChain = candidateChain => {
       AddressIndex.applyBlock(blockchain[i], indexed);
       ChainIndex.applyBlock(blockchain[i]);
       // 서명 검증은 isChainValid 에서 끝났으므로 여기서는 반영만 한다
-      indexed = updateUTxOuts(blockchain[i].data, indexed);
+      indexed = updateUTxOuts(blockchain[i].data, indexed, blockchain[i].index);
     }
 
     updateMempool(uTxOuts);
@@ -588,7 +636,7 @@ const reinstateTxs = txs => {
   let restored = 0;
   for (const tx of txs) {
     try {
-      addToMempool(tx, snapshot);
+      addToMempool(tx, snapshot, nextHeight());
       restored++;
     } catch (e) {
       // 이미 다른 트랜잭션이 같은 UTxO 를 썼거나 유효하지 않게 된 경우
@@ -599,9 +647,40 @@ const reinstateTxs = txs => {
   }
 };
 
+/*
+ * 저장해 둔 mempool 을 되살린다.
+ *
+ * 그동안 블록에 담겼거나 다른 트랜잭션이 같은 UTxO 를 써 버렸을 수 있으므로
+ * 그대로 믿지 않고 다시 검증한다. 떨어지는 것은 그냥 버린다 —
+ * 비트코인 코어가 LoadMempool 에서 하는 것과 같다.
+ */
+const restoreMempool = () => {
+  const saved = Store.loadMempool();
+  if (saved.length === 0) {
+    return 0;
+  }
+  const snapshot = getUTxOutList();
+  let restored = 0;
+  for (const tx of saved) {
+    try {
+      addToMempool(tx, snapshot, nextHeight());
+      restored++;
+    } catch (e) {
+      // 이미 담겼거나 더는 유효하지 않다
+    }
+  }
+  console.log(
+    `저장된 mempool 에서 ${restored}건을 되살렸습니다 (저장돼 있던 것 ${saved.length}건)`
+  );
+  return restored;
+};
+
+// 지금 mempool 을 파일에 남긴다. 종료할 때 부른다.
+const persistMempool = () => Store.saveMempool(getMempool());
+
 // 블록 체인 더하기
 const addBlockToChain = candidateBlock => {
-  if(isBlockValid(candidateBlock, getNewestBlock(), findDifficulty())){
+  if(isBlockValid(candidateBlock, getBlockChain())){
     const processedTxs = processTxs(
       candidateBlock.data,
       uTxOuts,
@@ -703,6 +782,8 @@ const initChain = (dataDir) => {
       "저장된 체인의 제네시스가 지금 genesis.json 과 다릅니다. 저장본을 버리고 새로 시작합니다."
     );
     Store.writeBlocks([genesisBlock]);
+    // 저 체인에 속하던 mempool 도 함께 버린다
+    Store.saveMempool([]);
     return { restored: 0, height: 0 };
   }
 
@@ -712,7 +793,7 @@ const initChain = (dataDir) => {
 
   for (let i = 1; i < persisted.length; i++) {
     const block = persisted[i];
-    if (!isBlockValid(block, chain[chain.length - 1], difficultyForNext(chain))) {
+    if (!isBlockValid(block, chain)) {
       console.log(`저장된 블록 #${block.index} 이 유효하지 않습니다. 여기까지만 복원합니다.`);
       break;
     }
@@ -730,6 +811,7 @@ const initChain = (dataDir) => {
   uTxOuts = utxos;
   undoLog = undo;
   rebuildIndexes();
+  restoreMempool();
 
   // 중간에 잘렸다면 파일도 맞춰 준다
   if (chain.length !== persisted.length) {
@@ -778,20 +860,43 @@ const getAccountBalance = () => getWalletBalance(uTxOuts);
  */
 const sendTx = (address, amount, fee = 0) => {
   const confirmed = getUTxOutList();
-  const tx = createTx(
-    address,
-    amount,
-    getSpendableUTxOuts(confirmed),
-    getMempool(),
-    fee
-  );
-  addToMempool(tx, confirmed);
+  let tx;
+  try {
+    tx = createTx(
+      address,
+      amount,
+      // 아직 묻히지 않은 코인베이스는 고르지 않는다. 골라 봐야 검증에서 떨어진다.
+      getMatureUTxOuts(getSpendableUTxOuts(confirmed), nextHeight()),
+      getMempool(),
+      fee
+    );
+  } catch (e) {
+    /*
+     * 돈이 없는 것과 "있는데 아직 못 쓰는 것"은 다르다. 채굴 보상이
+     * 묻히기를 기다리는 중이라면 그렇다고 말해 줘야 한다 — 잔액이
+     * 보이는데 "Not enough funds" 만 나오면 고장으로 보인다.
+     */
+    const immature = getImmatureBalance();
+    if (immature > 0) {
+      throw Error(
+        `${e.message} — 채굴 보상 ${immature} 은 아직 쓸 수 없습니다. ` +
+          `코인베이스 출력은 ${COINBASE_MATURITY}블록이 쌓여야 합니다.`
+      );
+    }
+    throw e;
+  }
+  addToMempool(tx, confirmed, nextHeight());
   require("./p2p").broadcastMempool();
   return tx;
 };
 
-// 확정 잔액과, mempool 까지 반영한 실제로 쓸 수 있는 잔액
-const getSpendableBalance = () => getWalletBalance(getSpendableUTxOuts(uTxOuts));
+// mempool 과 코인베이스 성숙도까지 반영해 지금 실제로 보낼 수 있는 금액
+const getSpendableBalance = () =>
+  getWalletBalance(getMatureUTxOuts(getSpendableUTxOuts(uTxOuts), nextHeight()));
+
+// 아직 묻히지 않아 쓸 수 없는 채굴 보상
+const getImmatureBalance = () =>
+  getWalletBalance(uTxOuts.filter(uTxOut => !isSpendable(uTxOut, nextHeight())));
 
 /*
  * 피어에게 받은 트랜잭션을 mempool 에 넣는다.
@@ -804,7 +909,7 @@ const handleIncomingTxs = txs => {
   const snapshot = getUTxOutList();
   for (const tx of txs) {
     try {
-      addToMempool(tx, snapshot);
+      addToMempool(tx, snapshot, nextHeight());
     } catch (e) {
       console.log(`피어가 보낸 트랜잭션을 받지 못했습니다: ${e.message}`);
     }
@@ -816,6 +921,7 @@ module.exports = {
   countCommonPrefix,
   stopMiners,
   initChain,
+  persistMempool,
   rebuildIndexes,
   getTxProof,
   getBlockByHash,
@@ -823,6 +929,8 @@ module.exports = {
   findTx,
   calculateNewDifficulty,
   difficultyForNext,
+  medianTimePast,
+  MAX_FUTURE_BLOCK_TIME,
   isBlockValid,
   addBlockToChain,
   isBlockStructureValid,
@@ -831,6 +939,8 @@ module.exports = {
   createNewBlock,
   getAccountBalance,
   getSpendableBalance,
+  getImmatureBalance,
+  nextHeight,
   sendTx,
   handleIncomingTxs,
   getUTxOutList
