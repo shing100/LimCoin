@@ -1,7 +1,11 @@
 const WebSockets = require('ws'),
   Blockchain = require('./blockchain'),
   Mempool = require("./memPool"),
-  ChainIndex = require("./chainIndex");
+  ChainIndex = require("./chainIndex"),
+  Params = require("./params");
+
+// 망 매직. 다른 망의 피어는 붙자마자 끊는다 — 테스트넷과 메인넷이 섞이면 안 된다.
+const NETWORK_MAGIC = Params.current().magic;
 
 const {
   getNewestBlock, isBlockStructureValid, replaceChain, getBlockChain,
@@ -177,8 +181,8 @@ const mempoolResponse = data => {
   };
 };
 
-// "나는 여기 있다" — 남이 나에게 걸 수 있는 주소
-const hello = url => ({ type: HELLO, data: { url } });
+// "나는 여기 있다" — 어느 망인지, 그리고 남이 나에게 걸 수 있는 주소(없으면 null)
+const hello = url => ({ type: HELLO, data: { network: NETWORK_MAGIC, url } });
 const getPeersMessage = () => ({ type: GET_PEERS, data: null });
 const peersResponse = peers => ({ type: PEERS_RESPONSE, data: { peers } });
 
@@ -207,10 +211,9 @@ const initSocketConnection = ws => {
   sockets.push(ws);
   handleSocketMessages(ws);
   handleSocketError(ws);
+  // 망을 먼저 밝힌다. 상대가 다른 망이면 이걸 보고 끊는다.
+  sendMessage(ws, hello(publicUrl));
   sendMessage(ws, getLatest());
-  if (publicUrl !== null) {
-    sendMessage(ws, hello(publicUrl));
-  }
   // 새로 붙은 피어에게만 mempool 과 피어 목록을 요청한다
   setTimeout(() => {
     sendMessage(ws, getAllMempool());
@@ -314,6 +317,14 @@ const handleMessage = (ws, message) => {
         if(message.data === null || typeof message.data !== "object"){
           break;
         }
+        if(message.data.network !== NETWORK_MAGIC){
+          console.log(`다른 망의 피어입니다 (${message.data.network}). 끊습니다.`);
+          if (ws.peerUrl) {
+            disconnectPeer(ws.peerUrl); // 우리가 건 것이면 다시 걸지도 않는다
+          }
+          ws.close();
+          break;
+        }
         handleHello(ws, message.data.url);
         break;
       case GET_PEERS:
@@ -333,8 +344,8 @@ const handleMessage = (ws, message) => {
  * 우리 자신의 주소는 배우지 않는다.
  */
 const handleHello = (ws, url) => {
-  if (!isPeerUrl(url) || url === publicUrl) {
-    return;
+  if (url === null || !isPeerUrl(url) || url === publicUrl) {
+    return; // 공개 주소를 알리지 않는 피어. 망 확인은 끝났다.
   }
   ws.advertisedUrl = url;
   learnAddress(url);
@@ -952,6 +963,7 @@ module.exports = {
   getKnownAddresses,
   getPeers,
   MAX_OUTBOUND,
+  NETWORK_MAGIC,
   broadcastNewBlock,
   broadcastMempool
 };

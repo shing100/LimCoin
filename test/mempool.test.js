@@ -3,14 +3,13 @@
  */
 const test = require("node:test");
 const assert = require("node:assert");
-const elliptic = require("elliptic");
 
 const Mempool = require("../src/memPool");
 const { getTxId, getTxFee } = require("../src/transactions");
 const { toHexString } = require("../src/utils");
 const { COIN, parseLim } = require("../src/units");
 
-const ec = new elliptic.ec("secp256k1");
+const { ecShim: ec, fakeId } = require("./helpers");
 
 const makeWallet = () => {
   const keyPair = ec.genKeyPair();
@@ -20,7 +19,7 @@ const makeWallet = () => {
 // seed 하나를 써서 change 만큼 돌려받는 트랜잭션. 차액이 수수료가 된다.
 const spend = (owner, receiver, seed, inputAmount, sendAmount, change) => {
   const tx = {
-    txIns: [{ txOutId: seed, txOutIndex: 0, signature: "" }],
+    txIns: [{ txOutId: fakeId(seed), txOutIndex: 0, signature: "" }],
     txOuts: [{ address: receiver, amount: sendAmount }]
   };
   if (change > 0) {
@@ -32,7 +31,7 @@ const spend = (owner, receiver, seed, inputAmount, sendAmount, change) => {
 };
 
 const utxo = (owner, seed, amount) => ({
-  txOutId: seed,
+  txOutId: fakeId(seed),
   txOutIndex: 0,
   address: owner.address,
   amount
@@ -79,7 +78,7 @@ test("블록에 담겨 UTxO 가 사라지면 pool 에서도 빠진다", () => {
   Mempool.updateMempool([utxo(owner, "s2", 10 * COIN)]);
   const left = Mempool.getMempool();
   assert.strictEqual(left.length, 1);
-  assert.strictEqual(left[0].txIns[0].txOutId, "s2");
+  assert.strictEqual(left[0].txIns[0].txOutId, fakeId("s2"));
 
   Mempool.updateMempool([]);
   assert.strictEqual(Mempool.getMempool().length, 0);

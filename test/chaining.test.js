@@ -5,7 +5,6 @@
  */
 const test = require("node:test");
 const assert = require("node:assert");
-const elliptic = require("elliptic");
 
 const {
   getTxId, processTxs, updateUTxOuts, createCoinbaseTx, getBlockSubsidy,
@@ -16,7 +15,7 @@ const { toHexString } = require("../src/utils");
 const { COIN, parseLim } = require("../src/units");
 const { indexByOutpoint, keyOf } = require("../src/utxo");
 
-const ec = new elliptic.ec("secp256k1");
+const { ecShim: ec, fakeId } = require("./helpers");
 
 const makeWallet = () => {
   const keyPair = ec.genKeyPair();
@@ -26,7 +25,7 @@ const makeWallet = () => {
 // outpoint 하나를 써서 to 에게 보내고 남는 것을 owner 가 거슬러 받는다
 const spend = (owner, to, txOutId, txOutIndex, send, change) => {
   const tx = {
-    txIns: [{ txOutId, txOutIndex, signature: "" }],
+    txIns: [{ txOutId: fakeId(txOutId), txOutIndex, signature: "" }],
     txOuts: [{ address: to, amount: send }]
   };
   if (change > 0) {
@@ -38,7 +37,7 @@ const spend = (owner, to, txOutId, txOutIndex, send, change) => {
 };
 
 const seedUTxOut = (owner, id, amount) => ({
-  txOutId: id,
+  txOutId: fakeId(id),
   txOutIndex: 0,
   address: owner.address,
   amount

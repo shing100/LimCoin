@@ -1,0 +1,6 @@
+node_modules
+data
+src/wallet.json
+src/privateKey
+*.log
+.git

@@ -10,17 +10,20 @@ const express = require("express"),
     Miner = require("./miner"),
     AddressIndex = require("./addressIndex"),
     ChainIndex = require("./chainIndex"),
+    Params = require("./params"),
     crypto = require("crypto");
 
 const {
   getBlockChain, createNewBlock, getAccountBalance, getSpendableBalance,
-  getImmatureBalance, sendTx, getUTxOutList, persistMempool,
+  getImmatureBalance, sendTx, getUTxOutList, persistMempool, submitTx, chainWork,
   getTxProof, getNewestBlock, initChain, getBlockByHash, findTx
 } = Blockchain;
 const { getTxFee } = Transactions;
 const { indexByOutpoint, indexByAddress } = require("./utxo");
 const { startP2PServer, setPublicUrl, connectToPeers, disconnectPeer, getPeers, getKnownAddresses } = P2P;
 const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance, getMnemonic, restoreFromMnemonic, GAP_LIMIT } = Wallet;
+const { version: VERSION } = require("../package.json");
+const STARTED_AT = Date.now();
 const AddressIndexApi = require("./addressIndex");
 const { getMempool } = Mempool;
 const {
@@ -56,7 +59,7 @@ app.use(morgan("combined"));
 // X-Total-Count 는 단순 응답 헤더가 아니라서, 명시적으로 노출하지 않으면
 // 교차 출처에서 읽을 수 없다. 익스플로러의 페이지네이션이 이 값에 기댄다.
 const allowCors = cors({ exposedHeaders: ["X-Total-Count"] });
-const readOnly = ["/blocks", "/transactions", "/peers", "/address", "/info", "/search", "/fees"];
+const readOnly = ["/blocks", "/transactions", "/peers", "/address", "/info", "/search", "/fees", "/health", "/metrics"];
 
 app.use((req, res, next) => {
   // 읽기 전용은 누구에게나 연다. 익스플로러가 붙어야 한다.
@@ -107,6 +110,18 @@ const requireWalletAuth = (req, res, next) => {
 
   if (!tokenMatches(token)) {
     res.status(401).send("이 엔드포인트는 지갑 토큰이 필요합니다");
+    return;
+  }
+  next();
+};
+
+/*
+ * 지갑이 꺼진 노드(LIMCOIN_WALLET=off)에서는 지갑을 쓰는 엔드포인트가 없다.
+ * 채굴(POST /blocks, /mining)은 LIMCOIN_MINING_ADDRESS 가 있으면 된다.
+ */
+const requireWallet = (req, res, next) => {
+  if (!Wallet.isEnabled()) {
+    res.status(503).send("이 노드는 지갑 없이 돕니다 (LIMCOIN_WALLET=off). 외부에서 서명해 POST /transactions/raw 로 보내세요.");
     return;
   }
   next();
@@ -201,7 +216,7 @@ app.route("/peers")
  * 블록에 없지만 이미 남에게 간 것이라, 확정 잔액만 보여 주면 없는 돈이
  * 있는 것처럼 보인다.
  */
-app.get("/me/balance", requireWalletAuth, (req, res) => {
+app.get("/me/balance", requireWalletAuth, requireWallet, (req, res) => {
   res.send({
     balance: getAccountBalance(),
     spendable: getSpendableBalance(),
@@ -211,7 +226,7 @@ app.get("/me/balance", requireWalletAuth, (req, res) => {
   });
 });
 
-app.get("/me/address", requireWalletAuth, (req,res) => {
+app.get("/me/address", requireWalletAuth, requireWallet, (req,res) => {
   res.send(getReceiveAddress());
 });
 
@@ -221,7 +236,7 @@ app.get("/me/address", requireWalletAuth, (req,res) => {
  * 백서 10장대로 거스름돈을 새 주소로 받으므로, 지갑은 주소를 여러 개
  * 갖게 된다. "내 주소"가 하나뿐이라는 전제가 더는 성립하지 않는다.
  */
-app.get("/me/addresses", requireWalletAuth, (req, res) => {
+app.get("/me/addresses", requireWalletAuth, requireWallet, (req, res) => {
   // 주소마다 UTxOut 전체를 훑으면 주소 수 x UTxOut 수다.
   // 색인을 한 번만 만들면 한 번 훑는 것으로 끝난다.
   const balances = indexByAddress(getUTxOutList());
@@ -243,7 +258,7 @@ app.get("/me/addresses", requireWalletAuth, (req, res) => {
  * 그건 UTxOut 집합을 가진 노드만 할 수 있다. 주소 색인이 블록에 대해
  * 하는 일을 mempool 에 대해 하는 셈이라, 응답 모양도 색인과 맞춘다.
  */
-app.get("/me/pending", requireWalletAuth, (req, res) => {
+app.get("/me/pending", requireWalletAuth, requireWallet, (req, res) => {
   const mine = new Set(getAddresses());
   const mempool = getMempool();
 
@@ -296,7 +311,7 @@ app.get("/me/pending", requireWalletAuth, (req, res) => {
 });
 
 // 받을 주소를 새로 하나 만든다
-app.post("/me/address", requireWalletAuth, (req, res) => {
+app.post("/me/address", requireWalletAuth, requireWallet, (req, res) => {
   res.send({ address: getNewAddress() });
 });
 
@@ -306,7 +321,7 @@ app.post("/me/address", requireWalletAuth, (req, res) => {
  * 이 단어들만 있으면 지갑을 통째로 되살릴 수 있다. 곧 이 응답을 보는
  * 것은 지갑을 보는 것과 같으므로 토큰이 필요하다.
  */
-app.get("/me/mnemonic", requireWalletAuth, (req, res) => {
+app.get("/me/mnemonic", requireWalletAuth, requireWallet, (req, res) => {
   const mnemonic = getMnemonic();
   if (mnemonic === null) {
     res.status(404).send("이 지갑에는 니모닉이 없습니다(예전 형식으로 만들어진 지갑입니다)");
@@ -323,7 +338,7 @@ app.get("/me/mnemonic", requireWalletAuth, (req, res) => {
  *
  * 지금 지갑을 덮어쓴다. 되살릴 니모닉이 맞는지 먼저 확인할 것.
  */
-app.post("/me/restore", requireWalletAuth, (req, res) => {
+app.post("/me/restore", requireWalletAuth, requireWallet, (req, res) => {
   try {
     const { body: { mnemonic } } = req;
     if (typeof mnemonic !== "string" || mnemonic.trim() === "") {
@@ -338,6 +353,60 @@ app.post("/me/restore", requireWalletAuth, (req, res) => {
   } catch (e) {
     res.status(400).send(e.message);
   }
+});
+
+/*
+ * 어떤 블록 뒤에 붙은 블록들. 입금 감시가 쓰는 길이다.
+ *
+ * 마지막으로 본 블록 해시를 주면 그 다음부터 순서대로 준다(최대 500).
+ * 그 해시가 우리 체인에 없으면 404 — 체인이 갈라져 그 블록이 밀려난 것이다.
+ * 그때는 더 오래된, 충분히 묻힌 블록부터 다시 훑어야 한다.
+ */
+app.get("/blocks/since/:hash", (req, res) => {
+  const chain = getBlockChain();
+  const height = ChainIndex.findBlockHeight(req.params.hash);
+  if (height === undefined) {
+    res.status(404).send("그 블록은 우리 체인에 없습니다 (갈라져 밀려났을 수 있습니다). 더 오래된 블록부터 다시 훑으세요.");
+    return;
+  }
+  const limit = clampInt(req.query.limit, 100, 500);
+  const blocks = chain.slice(height + 1, height + 1 + limit);
+  res.set("X-Total-Count", String(chain.length - 1 - height));
+  res.send({ height: chain.length - 1, blocks });
+});
+
+// 살아 있는가. 컨테이너 헬스체크와 로드밸런서가 본다.
+app.get("/health", (req, res) => {
+  const newest = getNewestBlock();
+  res.send({
+    ok: true,
+    network: Params.current().name,
+    version: VERSION,
+    height: newest.index,
+    tipAge: Math.round(Date.now() / 1000) - newest.timestamp,
+    peers: getPeers().length,
+    mempool: getMempool().length,
+    walletEnabled: Wallet.isEnabled(),
+    uptime: Math.round((Date.now() - STARTED_AT) / 1000)
+  });
+});
+
+// Prometheus 텍스트 형식. 의존성 없이 직접 찍는다.
+app.get("/metrics", (req, res) => {
+  const newest = getNewestBlock();
+  const lines = [
+    "# TYPE limcoin_height gauge", `limcoin_height ${newest.index}`,
+    "# TYPE limcoin_difficulty gauge", `limcoin_difficulty ${newest.difficulty}`,
+    "# TYPE limcoin_chain_work gauge", `limcoin_chain_work ${chainWork(getBlockChain())}`,
+    "# TYPE limcoin_tip_age_seconds gauge", `limcoin_tip_age_seconds ${Math.round(Date.now() / 1000) - newest.timestamp}`,
+    "# TYPE limcoin_peers gauge", `limcoin_peers ${getPeers().length}`,
+    "# TYPE limcoin_mempool_size gauge", `limcoin_mempool_size ${getMempool().length}`,
+    "# TYPE limcoin_utxo_count gauge", `limcoin_utxo_count ${getUTxOutList().length}`,
+    "# TYPE limcoin_tx_total counter", `limcoin_tx_total ${ChainIndex.getIndexedTxCount()}`,
+    "# TYPE limcoin_mining_running gauge", `limcoin_mining_running ${Miner.getStatus().running ? 1 : 0}`,
+    "# TYPE limcoin_uptime_seconds counter", `limcoin_uptime_seconds ${Math.round((Date.now() - STARTED_AT) / 1000)}`
+  ];
+  res.type("text/plain; version=0.0.4").send(lines.join("\n") + "\n");
 });
 
 app.get("/blocks/:hash", (req, res) => {
@@ -374,11 +443,23 @@ app.get("/transactions/:id", (req, res) => {
   });
 });
 
+/*
+ * 밖에서 서명한 트랜잭션 넣기. 인증이 없다 — 유효한 서명이 곧 권한이다.
+ * 거래소·하드웨어 지갑·다른 언어로 만든 지갑이 쓰는 길. 형식은 docs/SPEC.md.
+ */
+app.post("/transactions/raw", (req, res) => {
+  try {
+    res.send(submitTx(req.body));
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
+});
+
 app.route("/transactions")
   .get((req, res) => {
     res.send(getMempool());
   })
-  .post(requireWalletAuth, (req, res) => {
+  .post(requireWalletAuth, requireWallet, (req, res) => {
     try {
       const { body: { address, amount, fee = 0 } } = req;
       if (address === undefined || amount === undefined) {
@@ -521,7 +602,14 @@ app.get("/info", (req, res) => {
     coinbaseMaturity: COINBASE_MATURITY,
     indexedAddresses: AddressIndex.getIndexedAddressCount(),
     // 지갑이 기본값으로 쓸 입력당 권장 수수료
-    recommendedFeePerInput: Mempool.estimateFee(getUTxOutList(), MAX_TXS_PER_BLOCK - 1).perInput
+    recommendedFeePerInput: Mempool.estimateFee(getUTxOutList(), MAX_TXS_PER_BLOCK - 1).perInput,
+    // 어느 망의 노드인지. 주소 형식과 제네시스가 이것으로 갈린다.
+    network: Params.current().name,
+    addressVersion: Params.current().addressVersion,
+    genesisHash: getBlockChain()[0].hash,
+    chainWork: chainWork(getBlockChain()),
+    walletEnabled: Wallet.isEnabled(),
+    version: VERSION
   });
 });
 
@@ -578,7 +666,17 @@ app.get("/address/:address/utxos", (req, res) => {
 
 // HTTP + P2P 서버를 띄운다. 포트를 넘기면 그 포트를 쓴다(Electron 지갑용).
 const start = (port = PORT, options = {}) => {
-  initWallet();
+  /*
+   * LIMCOIN_WALLET=off 면 지갑을 만들지도 읽지도 않는다. 거래소나 채굴자는
+   * 키를 자기 시스템에 두고 노드는 체인만 보게 한다.
+   */
+  const walletEnabled = options.wallet !== false && process.env.LIMCOIN_WALLET !== "off";
+  if (walletEnabled) {
+    initWallet();
+  } else {
+    Wallet.setEnabled(false);
+    console.log("지갑 없이 뜹니다 (LIMCOIN_WALLET=off). 송금은 POST /transactions/raw 로.");
+  }
 
   // 저장된 체인을 읽어 이어서 시작한다
   const { restored, height } = initChain(options.dataDir);

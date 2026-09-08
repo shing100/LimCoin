@@ -1,9 +1,9 @@
 {
   "index": 0,
-  "hash": "9002dadc48d88cea9dea881c38f9cf67c0f9456bcbc63350d948cf8a2adf7ab2",
+  "hash": "2e6e3814c797984f1e8059ebd735e1d6062b8cd4b640bfaf67ead7796ae23acf",
   "previousHash": "0000000000000000000000000000000000000000000000000000000000000000",
   "timestamp": 1788853057,
-  "merkleRoot": "0548843f64bdfb26625537eec7ac828ea186eeb750f71c534ab82493e6b621c6",
+  "merkleRoot": "2d4c69ee638f11c9ab4db03de414da87c0c285b4e8fc9a4cc470e64fbf4f48b4",
   "data": [
     {
       "txIns": [
@@ -15,11 +15,11 @@
       ],
       "txOuts": [
         {
-          "address": "LhkDDbkPwApRDnBrncVUvLn9ZGocMALgCD",
+          "address": "mnzHJWsTGeyGdrZrYHCGbUMjzjhW65a9mj",
           "amount": 1000000000
         }
       ],
-      "id": "0548843f64bdfb26625537eec7ac828ea186eeb750f71c534ab82493e6b621c6"
+      "id": "2d4c69ee638f11c9ab4db03de414da87c0c285b4e8fc9a4cc470e64fbf4f48b4"
     }
   ],
   "difficulty": 15,

@@ -15,12 +15,14 @@
  * 머클 루트를 쓰면 헤더가 고정 크기가 되고, 트랜잭션 하나의 포함 증명은
  * log2(n) 개 해시로 끝난다.
  */
-const CryptoJS = require("crypto-js");
+const { sha256dHex } = require("./serialization");
 
 // 트랜잭션이 없는 트리의 루트. 실제로는 코인베이스가 항상 있으므로 쓰이지 않는다.
 const EMPTY_ROOT = "0".repeat(64);
 
-const hashPair = (left, right) => CryptoJS.SHA256(left + right).toString();
+// 두 해시의 바이트를 이어 sha256d. 비트코인과 같다 (예전에는 hex 문자열을 이어 SHA256 한 번).
+const hashPair = (left, right) =>
+  sha256dHex(Buffer.concat([Buffer.from(left, "hex"), Buffer.from(right, "hex")]));
 
 // 한 단계 위로 접는다. 개수가 홀수면 마지막 것을 자기 자신과 짝짓는다(비트코인과 동일).
 const foldLevel = level => {

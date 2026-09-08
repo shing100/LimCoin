@@ -21,8 +21,11 @@ const path = require("path"),
 
 const { keyOf, outpointKey } = require("./utxo");
 
+const Address = require("./address");
+
 const {
   getPublicKey,
+  addressVersion,
   getTxId,
   signTxIn,
   TxIn,
@@ -37,10 +40,21 @@ const WALLET_VERSION = 2;
  * 체인을 보고 찾아야 하는데, 중간에 안 쓴 주소가 몇 개 있을 수 있으므로
  * 연속으로 이만큼 비어 있으면 거기서 멈춘다 (BIP44 의 gap limit).
  */
+/*
+ * 개인키 -> 이 망의 주소. Base58Check(RIPEMD160(SHA256(공개키))).
+ * 예전에는 공개키 hex 가 곧 주소였다 — address.js 참고.
+ */
+const addressOf = privateKey =>
+  Address.addressFromPublicKey(getPublicKey(privateKey), addressVersion());
+
 const GAP_LIMIT = 20;
 const MAX_SCAN = 1000;
 
-const walletLocation = () => path.join(__dirname, "wallet.json");
+/*
+ * 지갑 파일 위치. 기본은 소스 옆의 wallet.json 이지만, 컨테이너에서는
+ * 볼륨에 두어야 이미지가 바뀌어도 남는다 (LIMCOIN_WALLET_FILE).
+ */
+const walletLocation = () => process.env.LIMCOIN_WALLET_FILE || path.join(__dirname, "wallet.json");
 // 예전 지갑이 쓰던 파일. 있으면 그 키를 가져온다.
 const legacyKeyLocation = () => path.join(__dirname, "privateKey");
 
@@ -59,7 +73,21 @@ const reload = () => {
   cache = null;
 };
 
+/*
+ * 지갑을 끈 노드. 거래소나 채굴자는 키를 자기 시스템에서 관리하고 노드는
+ * 체인만 보게 한다 (LIMCOIN_WALLET=off). 그러면 이 프로세스가 뚫려도
+ * 가져갈 키가 없다. 꺼진 상태에서 지갑을 건드리면 여기서 막힌다.
+ */
+let enabled = true;
+const setEnabled = value => {
+  enabled = value;
+};
+const isEnabled = () => enabled;
+
 const readWallet = () => {
+  if (!enabled) {
+    throw Error("지갑이 꺼져 있습니다 (LIMCOIN_WALLET=off)");
+  }
   if (cache !== null) {
     return cache;
   }
@@ -79,6 +107,7 @@ const WALLET_MODE = 0o600;
 
 const writeWallet = wallet => {
   cache = { wallet, seed: seedOf(wallet) };
+  fs.mkdirSync(path.dirname(walletLocation()), { recursive: true });
   fs.writeFileSync(walletLocation(), JSON.stringify(wallet, null, 2) + "\n", {
     mode: WALLET_MODE
   });
@@ -138,25 +167,21 @@ const deriveAt = (branch, index) =>
  * 지갑이 가진 모든 키. 받는 주소 + 거스름돈 주소 + 예전 형식에서 가져온 것.
  */
 const getAllKeys = () => {
-  const { wallet, seed } = readWallet();
+  const { wallet } = readWallet();
   const keys = [];
-
-  const pushRange = (branch, count, kind) => {
-    HD.deriveRange(seed, branch, 0, count).forEach((privateKey, index) => {
-      keys.push({ kind, index, privateKey, address: getPublicKey(privateKey) });
-    });
-  };
-
-  pushRange(HD.RECEIVE, wallet.nextReceive, "receive");
-  pushRange(HD.CHANGE, wallet.nextChange, "change");
-
-  for (const privateKey of wallet.imported) {
-    keys.push({
-      kind: "imported",
-      index: null,
-      privateKey,
-      address: getPublicKey(privateKey)
-    });
+  for (const [kind, branch, count] of [["receive", HD.RECEIVE, wallet.nextReceive], ["change", HD.CHANGE, wallet.nextChange]]) {
+    for (let index = 0; index < count; index++) {
+      const privateKey = deriveAt(branch, index);
+      keys.push({ kind, index, privateKey, address: addressOf(privateKey) });
+    }
+  }
+  /*
+   * 예전 형식 키(imported)는 두 주소로 받을 수 있다. 예전 방식(공개키 hex)
+   * 으로 이미 받아 둔 코인과, 새 형식으로 앞으로 받을 코인 둘 다.
+   */
+  for (const privateKey of wallet.imported || []) {
+    keys.push({ kind: "imported", index: null, privateKey, address: getPublicKey(privateKey) });
+    keys.push({ kind: "imported", index: null, privateKey, address: addressOf(privateKey) });
   }
   return keys;
 };
@@ -166,13 +191,13 @@ const getAddresses = () => getAllKeys().map(key => key.address);
 // 지금 받는 데 쓰는 주소 (가장 최근에 만든 받는 주소)
 const getReceiveAddress = () => {
   const { wallet } = readWallet();
-  return getPublicKey(deriveAt(HD.RECEIVE, wallet.nextReceive - 1));
+  return addressOf(deriveAt(HD.RECEIVE, wallet.nextReceive - 1));
 };
 
 // 받는 주소를 하나 더 만든다
 const getNewAddress = () => {
   const { wallet } = readWallet();
-  const address = getPublicKey(deriveAt(HD.RECEIVE, wallet.nextReceive));
+  const address = addressOf(deriveAt(HD.RECEIVE, wallet.nextReceive));
   writeWallet({ ...wallet, nextReceive: wallet.nextReceive + 1 });
   return address;
 };
@@ -183,7 +208,7 @@ const getNewAddress = () => {
  */
 const getChangeAddress = () => {
   const { wallet } = readWallet();
-  const address = getPublicKey(deriveAt(HD.CHANGE, wallet.nextChange));
+  const address = addressOf(deriveAt(HD.CHANGE, wallet.nextChange));
   writeWallet({ ...wallet, nextChange: wallet.nextChange + 1 });
   return address;
 };
@@ -224,7 +249,7 @@ const restoreFromMnemonic = (mnemonic, isUsed) => {
       // 멈추는 시점과는 무관하다.
       const batch = HD.deriveRange(seed, branch, index, GAP_LIMIT);
       for (const privateKey of batch) {
-        if (isUsed(getPublicKey(privateKey))) {
+        if (isUsed(addressOf(privateKey)) || isUsed(getPublicKey(privateKey))) {
           used = index + 1;
           consecutiveUnused = 0;
         } else {
@@ -454,11 +479,14 @@ module.exports = {
   getMnemonic,
   restoreFromMnemonic,
   reload,
+  setEnabled,
+  isEnabled,
   findAmountInUTxOuts,
   findExactMatch,
   DUST,
   GAP_LIMIT,
   getAllKeys,
+  addressOf,
   getAddresses,
   getReceiveAddress,
   getNewAddress,

@@ -256,7 +256,7 @@ test("상대 높이에 못 미치면 다음 묶음을 달라고 한다", () => {
 
 test("우리 체인 어디에도 붙지 않는 묶음은 버린다", () => {
   const before = getNewestBlock();
-  const stray = mineChainOnto({ ...before, hash: "다른우주", index: before.index }, 2, 30);
+  const stray = mineChainOnto({ ...before, hash: "f".repeat(64), index: before.index }, 2, 30);
 
   const ws = fakeSocket();
   P2P.handleMessage(ws, { type: "BLOCKS_RESPONSE", data: { blocks: stray, height: 999 } });

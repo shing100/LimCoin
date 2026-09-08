@@ -28,9 +28,14 @@ const blocksPath = () => path.join(dir, BLOCKS_FILE);
 const mempoolPath = () => path.join(dir, MEMPOOL_FILE);
 
 // 노드마다 다른 디렉터리를 써야 한 대에서 여러 노드를 띄울 수 있다.
+// 망마다 다른 디렉터리를 써야 메인넷 체인 위에 테스트넷 블록이 쌓이는 일이 없다
 const defaultDir = () =>
   process.env.LIMCOIN_DATA_DIR ||
-  path.join(__dirname, "..", "data", String(process.env.HTTP_PORT || 3000));
+  path.join(
+    __dirname, "..", "data",
+    require("./params").current().defaultDataSubdir,
+    String(process.env.HTTP_PORT || 3000)
+  );
 
 const open = (dataDir = defaultDir()) => {
   dir = dataDir;

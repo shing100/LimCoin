@@ -300,7 +300,7 @@ test("복구한 지갑의 주소는 원래 주소와 같다", () => {
   withTempWallet(() => {
     const mnemonic = BIP39.generateMnemonic();
     const seed = BIP39.mnemonicToSeed(mnemonic);
-    const expected = HD.getPublicKey(HD.derivePrivateKey(seed, HD.RECEIVE, 0));
+    const expected = Wallet.addressOf(HD.derivePrivateKey(seed, HD.RECEIVE, 0));
 
     Wallet.restoreFromMnemonic(mnemonic, () => false);
     assert.strictEqual(Wallet.getReceiveAddress(), expected);

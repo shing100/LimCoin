@@ -20,12 +20,11 @@
  * (BIP39 니모닉은 2048단어 목록이 필요해 여기서는 다루지 않는다.
  *  씨앗을 16진수로 다룬다.)
  */
-const crypto = require("crypto"),
-  elliptic = require("elliptic"),
-  BN = require("bn.js");
+const crypto = require("crypto");
+const Keys = require("./keys");
 
-const ec = new elliptic.ec("secp256k1");
-const CURVE_ORDER = ec.curve.n;
+// 곡선의 차수 n. 큰 수는 BigInt 로 다룬다 — 예전에는 bn.js 와 elliptic 을 썼다.
+const CURVE_ORDER = Keys.CURVE_ORDER;
 
 // BIP32 가 쓰는 문자열. 씨앗에서 마스터 키를 뽑을 때의 HMAC 키다.
 const MASTER_KEY_SALT = "Bitcoin seed";
@@ -35,7 +34,8 @@ const SEED_BYTES = 32;
 const hmac512 = (key, data) =>
   crypto.createHmac("sha512", key).update(data).digest();
 
-const toHex32 = bn => bn.toString(16).padStart(64, "0");
+const toHex32 = n => n.toString(16).padStart(64, "0");
+const bufferToBigInt = buf => BigInt("0x" + buf.toString("hex"));
 
 const generateSeed = () => crypto.randomBytes(SEED_BYTES).toString("hex");
 
@@ -45,8 +45,8 @@ const generateSeed = () => crypto.randomBytes(SEED_BYTES).toString("hex");
  */
 const masterFromSeed = seedHex => {
   const digest = hmac512(MASTER_KEY_SALT, Buffer.from(seedHex, "hex"));
-  const key = new BN(digest.slice(0, 32));
-  if (key.isZero() || key.gte(CURVE_ORDER)) {
+  const key = bufferToBigInt(digest.slice(0, 32));
+  if (key === 0n || key >= CURVE_ORDER) {
     // 확률적으로 거의 일어나지 않지만 BIP32 가 정의한 처리다
     throw Error("이 씨앗으로는 키를 만들 수 없습니다. 다시 만드세요.");
   }
@@ -54,10 +54,8 @@ const masterFromSeed = seedHex => {
 };
 
 // 공개키를 33바이트 압축 형식으로. BIP32 의 serP() 에 해당한다.
-const serializePoint = key => {
-  const point = ec.g.mul(key);
-  return Buffer.from(point.encode("array", true));
-};
+const serializePoint = key =>
+  Buffer.from(Keys.compressPublicKey(Keys.getPublicKey(toHex32(key))), "hex");
 
 /**
  * 자식 키 하나를 파생한다 (강화되지 않은 파생).
@@ -77,15 +75,15 @@ const deriveChild = (parent, index) => {
   ]);
 
   const digest = hmac512(parent.chainCode, data);
-  const tweak = new BN(digest.slice(0, 32));
+  const tweak = bufferToBigInt(digest.slice(0, 32));
 
-  if (tweak.gte(CURVE_ORDER)) {
+  if (tweak >= CURVE_ORDER) {
     // BIP32 는 이 경우 다음 index 로 넘어가라고 한다
     return deriveChild(parent, index + 1);
   }
 
-  const key = tweak.add(parent.key).umod(CURVE_ORDER);
-  if (key.isZero()) {
+  const key = (tweak + parent.key) % CURVE_ORDER;
+  if (key === 0n) {
     return deriveChild(parent, index + 1);
   }
 
@@ -128,11 +126,7 @@ const deriveRange = (seedHex, branch, from, count) => {
   return keys;
 };
 
-const getPublicKey = privateKeyHex =>
-  ec
-    .keyFromPrivate(privateKeyHex, "hex")
-    .getPublic()
-    .encode("hex");
+const getPublicKey = privateKeyHex => Keys.getPublicKey(privateKeyHex);
 
 module.exports = {
   generateSeed,

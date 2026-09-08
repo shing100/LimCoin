@@ -7,8 +7,8 @@
  */
 const test = require("node:test");
 const assert = require("node:assert");
-const elliptic = require("elliptic");
-const CryptoJS = require("crypto-js");
+const nodeCrypto = require("crypto");
+const sha256Hex = text => nodeCrypto.createHash("sha256").update(text).digest("hex");
 
 const {
   getTxId, validateTx, processTxs, createCoinbaseTx,
@@ -21,7 +21,7 @@ const { COIN, parseLim, formatLim } = require("../src/units");
 const { getTxProof } = require("../src/blockchain");
 const genesis = require("../src/genesis.json");
 
-const ec = new elliptic.ec("secp256k1");
+const { ecShim: ec, fakeId } = require("./helpers");
 const { toHexString } = require("../src/utils");
 
 const makeWallet = () => {
@@ -33,7 +33,7 @@ const makeWallet = () => {
 // 거스름돈으로 돌려받는 트랜잭션. 거스름돈을 줄이면 그만큼이 수수료가 된다.
 const makeSpend = (owner, receiverAddress, inputAmount, sendAmount, changeAmount) => {
   const tx = {
-    txIns: [{ txOutId: "seed", txOutIndex: 0, signature: "" }],
+    txIns: [{ txOutId: fakeId("seed"), txOutIndex: 0, signature: "" }],
     txOuts: [{ address: receiverAddress, amount: sendAmount }]
   };
   if (changeAmount > 0) {
@@ -45,7 +45,7 @@ const makeSpend = (owner, receiverAddress, inputAmount, sendAmount, changeAmount
 };
 
 const seedUTxOuts = (owner, amount) => [
-  { txOutId: "seed", txOutIndex: 0, address: owner.address, amount }
+  { txOutId: fakeId("seed"), txOutIndex: 0, address: owner.address, amount }
 ];
 
 /* ---------------------------------------------------------- 최소 단위 */
@@ -70,9 +70,12 @@ test("최소 단위: 표현할 수 없는 정밀도는 거부한다", () => {
 test("금액은 최소 단위 기준 정수여야 한다", () => {
   const owner = makeWallet();
   const uTxOuts = seedUTxOuts(owner, 10 * COIN);
-  // 소수 금액은 노드마다 반올림이 갈릴 수 있어 거부한다
-  const tx = makeSpend(owner, owner.address, 10 * COIN, 1.5, 0);
-  assert.strictEqual(validateTx(tx, uTxOuts), false);
+  // 소수 금액은 노드마다 반올림이 갈릴 수 있어 거부한다.
+  // 직렬화(uint64)가 먼저 막고, 직렬화를 피해 들어온 것은 검증이 거른다.
+  assert.throws(() => makeSpend(owner, owner.address, 10 * COIN, 1.5, 0), /uint64/);
+  const forged = makeSpend(owner, owner.address, 10 * COIN, 1, 0);
+  forged.txOuts[0].amount = 1.5; // id 는 그대로 두고 금액만 바꿔 끼운 것
+  assert.strictEqual(validateTx(forged, uTxOuts), false);
 });
 
 /* -------------------------------------------- 6장 Incentive: 수수료 */
@@ -194,12 +197,12 @@ test("총 발행량은 반감이 거듭돼도 상한을 넘지 않는다", () =>
 /* --------------------------------- 7장/8장: 머클 트리와 SPV 증명 */
 
 const fakeTxs = n =>
-  Array.from({ length: n }, (_, i) => ({ id: CryptoJS.SHA256("tx" + i).toString() }));
+  Array.from({ length: n }, (_, i) => ({ id: sha256Hex("tx" + i) }));
 
 test("머클 루트는 트랜잭션이 하나만 바뀌어도 달라진다", () => {
   const txs = fakeTxs(4);
   const before = getMerkleRoot(txs);
-  const after = getMerkleRoot([...txs.slice(0, 3), { id: CryptoJS.SHA256("다른것").toString() }]);
+  const after = getMerkleRoot([...txs.slice(0, 3), { id: sha256Hex("다른것") }]);
   assert.notStrictEqual(before, after);
 });
 
@@ -272,9 +275,9 @@ test("블록에 담을 때 수수료율이 높은 트랜잭션이 먼저 선택�
 
   // 입력 하나짜리 트랜잭션 셋을 수수료만 다르게 만든다
   const build = (fee, seed) => {
-    const uTxOut = { txOutId: seed, txOutIndex: 0, address: owner.address, amount: 10 * COIN };
+    const uTxOut = { txOutId: fakeId(seed), txOutIndex: 0, address: owner.address, amount: 10 * COIN };
     const tx = {
-      txIns: [{ txOutId: seed, txOutIndex: 0, signature: "" }],
+      txIns: [{ txOutId: fakeId(seed), txOutIndex: 0, signature: "" }],
       txOuts: [
         { address: receiver.address, amount: 5 * COIN },
         { address: owner.address, amount: 5 * COIN - fee }
