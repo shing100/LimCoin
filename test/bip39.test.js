@@ -196,6 +196,8 @@ const withTempWallet = fn => {
     } else if (fs.existsSync(walletFile)) {
       fs.unlinkSync(walletFile);
     }
+    // 모듈이 지갑을 캐시하므로 다음 테스트가 남은 것을 보지 않게 버린다
+    Wallet.reload();
   }
 };
 
@@ -225,6 +227,40 @@ test("복구는 gap limit 만큼 비어 있을 때까지 훑는다", () => {
     assert.strictEqual(found.receive, 5, "0..4 까지 찾아야 한다");
     assert.strictEqual(found.change, 3, "거스름돈 0..2");
     assert.strictEqual(Wallet.getMnemonic(), mnemonic);
+  });
+});
+
+test("복구해도 예전 형식 키(imported)는 잃지 않는다", () => {
+  /*
+   * 예전 형식 키로 받아 둔 코인은 니모닉으로 되살릴 수 없다. 씨앗에서
+   * 나온 키가 아니기 때문이다. 예전에는 복구할 때 imported 를 [] 로
+   * 덮어써서 그 코인을 통째로 잃었다.
+   */
+  withTempWallet(() => {
+    Wallet.initWallet();
+    const legacy = "ab".repeat(32);
+    const wallet = JSON.parse(fs.readFileSync(walletFile, "utf8"));
+    wallet.imported = [legacy];
+    fs.writeFileSync(walletFile, JSON.stringify(wallet, null, 2));
+    Wallet.reload();
+
+    Wallet.restoreFromMnemonic(BIP39.generateMnemonic(), () => false);
+
+    const after = JSON.parse(fs.readFileSync(walletFile, "utf8"));
+    assert.deepStrictEqual(after.imported, [legacy]);
+  });
+});
+
+test("지갑 파일은 주인만 읽을 수 있다", () => {
+  // 니모닉이 평문으로 들어간다. 24단어면 이 지갑의 코인을 다 가져갈 수 있다.
+  withTempWallet(() => {
+    if (fs.existsSync(walletFile)) {
+      fs.unlinkSync(walletFile);
+    }
+    Wallet.reload();
+    Wallet.initWallet();
+    const mode = fs.statSync(walletFile).mode & 0o777;
+    assert.strictEqual(mode, 0o600, `권한이 ${mode.toString(8)} 입니다`);
   });
 });
 

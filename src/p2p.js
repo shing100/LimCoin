@@ -104,16 +104,40 @@ const parseData = data => {
   try {
     return JSON.parse(data);
   } catch(e) {
-    console.log(e);
+    // 남이 보낸 것이 깨져 있는 것뿐이다. 스택을 뱉을 일이 아니다.
+    console.log("피어가 보낸 메시지가 JSON 이 아닙니다");
     return null;
   }
 }
 
-// 소켓 핸들러
+/*
+ * 피어가 보낸 메시지를 처리한다.
+ *
+ * 여기 들어오는 것은 전부 남이 보낸 바이트다. 예전에는 그것을 믿고
+ * 그대로 썼다. BLOCKCHAIN_RESPONSE 의 data 가 배열인지 보지 않아서
+ *
+ *   {"type":"BLOCKCHAIN_RESPONSE","data":123}
+ *
+ * 한 줄이면 노드가 죽었다 — 123[NaN] 이 undefined 가 되고 그것의
+ * .index 를 읽다가 TypeError 가 난다. ws 의 message 핸들러에서 던진
+ * 예외는 아무도 받지 않으므로 프로세스가 그대로 종료된다. 아무나
+ * P2P 포트에 붙어 한 번 보내면 그 노드는 내려간다.
+ *
+ * 두 겹으로 막는다. 모양을 먼저 보고, 그래도 남는 것은 try 로 가둔다.
+ * 한 피어가 보낸 것이 노드를 죽여서는 안 된다.
+ */
 const handleSocketMessages = ws => {
   ws.on("message", data => {
-    const message = parseData(data);
-    if(message === null){
+    try {
+      handleMessage(ws, parseData(data));
+    } catch (e) {
+      console.log(`피어가 보낸 메시지를 처리하다 실패했습니다: ${e.message}`);
+    }
+  });
+};
+
+const handleMessage = (ws, message) => {
+    if(message === null || typeof message !== "object"){
       return;
     }
     switch (message.type) {
@@ -124,25 +148,23 @@ const handleSocketMessages = ws => {
         sendMessage(ws, responseAll());  // 모든
         break;
       case BLOCKCHAIN_RESPONSE:
-        const receivedBlocks = message.data;
-        if(receivedBlocks == null){
+        if(!Array.isArray(message.data)){
+          console.log("BLOCKCHAIN_RESPONSE 의 본문이 블록 배열이 아닙니다");
           break;
         }
-        handleBlockchainResponse(receivedBlocks);
+        handleBlockchainResponse(message.data);
         break;
       case REQUEST_MEMPOOL:
         sendMessage(ws, returnMempool());
         break;
       case MEMPOOL_RESPONSE:
-        const receivedTxs = message.data;
-        if(!(receivedTxs instanceof Array)){
-          return;
+        if(!Array.isArray(message.data)){
+          break;
         }
         // 낱개로 넣으면 트랜잭션마다 UTxOut 집합을 복제하게 된다
-        handleIncomingTxs(receivedTxs);
+        handleIncomingTxs(message.data);
         break;
     }
-  });
 };
 
 const returnMempool = () => mempoolResponse(getMempool());
@@ -249,6 +271,8 @@ const getPeers = () =>
   });
 
 module.exports = {
+  // 테스트가 소켓 없이 메시지 처리를 부를 수 있게 열어 둔다
+  handleMessage,
   startP2PServer,
   connectToPeers,
   getPeers,

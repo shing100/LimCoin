@@ -1,6 +1,6 @@
 const Transactions = require("./transactions");
 
-const { validateTx, getTxFee, updateUTxOuts } = Transactions;
+const { validateTx, getTxFee, updateUTxOuts, isSpendable } = Transactions;
 const { keyOf, indexByOutpoint } = require("./utxo");
 
 // mempool 에 무한정 쌓이지 않게 상한을 둔다.
@@ -70,8 +70,20 @@ const updateMempool = uTxOutList => {
  */
 const getSpendableUTxOuts = uTxOutList => updateUTxOuts(mempool, uTxOutList);
 
+/*
+ * spendHeight 높이에서 실제로 쓸 수 있는 것만 남긴다.
+ * 갓 채굴한 코인베이스는 아직 묻히지 않아 빠진다.
+ */
+const getMatureUTxOuts = (uTxOutList, spendHeight) =>
+  uTxOutList.filter(uTxOut => isSpendable(uTxOut, spendHeight));
+
 // Mempool 에 추가하기
-const addToMempool = (tx, uTxOutList) => {
+/*
+ * spendHeight 는 이 트랜잭션이 담길 블록의 높이다. 코인베이스 출력이
+ * 충분히 묻혔는지 보려면 필요하다 — 지금 mempool 에 넣어도 되는지는
+ * "다음 블록에서 쓸 수 있는가"와 같은 물음이다.
+ */
+const addToMempool = (tx, uTxOutList, spendHeight) => {
   if (mempool.length >= MAX_MEMPOOL_SIZE) {
     throw Error(`The mempool is full (${MAX_MEMPOOL_SIZE} txs). Try again later.`);
   }
@@ -86,7 +98,7 @@ const addToMempool = (tx, uTxOutList) => {
     throw Error("This tx is not valid for the pool. Will not add it.");
   }
   // 확정된 것뿐 아니라 mempool 이 만든 출력도 볼 수 있어야 한다
-  if (!validateTx(tx, getSpendableUTxOuts(uTxOutList))) {
+  if (!validateTx(tx, getSpendableUTxOuts(uTxOutList), undefined, spendHeight)) {
     throw Error("This tx is invalid. Will not add it to pool");
   }
   mempool.push(tx);
@@ -102,10 +114,30 @@ const addToMempool = (tx, uTxOutList) => {
  * 재지 않으므로 입력 개수를 크기의 대용으로 쓴다 — 입력이 많을수록 서명
  * 검증 비용도 커지기 때문이다.
  */
-const selectTxsForBlock = (candidates, uTxOutList, limit) => {
+const selectTxsForBlock = (candidates, uTxOutList, limit, spendHeight) => {
   if (limit <= 0) {
     return [];
   }
+
+  /*
+   * 아직 묻히지 않은 코인베이스를 쓰는 것은 담지 않는다.
+   *
+   * mempool 에 들어올 때 성숙도를 보지만, 그 뒤 체인이 갈라져 짧아지면
+   * 다시 어려질 수 있다. 그대로 담으면 스스로 만든 블록이 검증에서
+   * 떨어진다. 빼기만 하고 mempool 에는 남겨 둔다 — 블록이 더 쌓이면
+   * 그때 담기면 된다.
+   *
+   * 확정 집합에 없는 입력은 mempool 이 만든 출력이다. mempool 에는
+   * 코인베이스가 없으므로 성숙도를 따질 일이 없다.
+   */
+  const confirmed = indexByOutpoint(uTxOutList);
+  const mature = candidates.filter(tx =>
+    tx.txIns.every(txIn => {
+      const source = confirmed.get(keyOf(txIn.txOutId, txIn.txOutIndex));
+      return source === undefined || isSpendable(source, spendHeight);
+    })
+  );
+  candidates = mature;
 
   // 부모가 만든 출력을 자식이 쓰는 경우가 있으므로, 수수료율만 보고 자를 수
   // 없다. 부모 없이 자식만 담기면 그 블록은 검증에서 떨어진다.
@@ -181,6 +213,7 @@ const selectTxsForBlock = (candidates, uTxOutList, limit) => {
 module.exports = {
   addToMempool,
   getSpendableUTxOuts,
+  getMatureUTxOuts,
   getMempool,
   updateMempool,
   selectTxsForBlock,

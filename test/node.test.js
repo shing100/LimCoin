@@ -26,6 +26,39 @@ test("열지 않은 저장소는 디스크를 건드리지 않는다", () => {
   Store.writeBlocks([genesis]);
 });
 
+test("mempool 도 저장하고 읽어 온다", () => {
+  /*
+   * 예전에는 mempool 이 메모리에만 있었다. 노드를 재시작하면 대기 중이던
+   * 트랜잭션이 그대로 사라졌고, 보낸 사람은 영문도 모른 채 다시 보내야 했다.
+   */
+  const dir = tmpDir();
+  Store.open(dir);
+  try {
+    assert.deepStrictEqual(Store.loadMempool(), []);
+
+    const txs = [{ id: "a", txIns: [], txOuts: [] }, { id: "b", txIns: [], txOuts: [] }];
+    Store.saveMempool(txs);
+    assert.deepStrictEqual(Store.loadMempool(), txs);
+
+    // append 가 아니라 통째로 갈아 끼운다 (블록이 붙으면 담긴 것이 빠진다)
+    Store.saveMempool([txs[1]]);
+    assert.deepStrictEqual(Store.loadMempool(), [txs[1]]);
+
+    // 다 담기면 빈 파일이 된다
+    Store.saveMempool([]);
+    assert.deepStrictEqual(Store.loadMempool(), []);
+  } finally {
+    Store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("열지 않은 저장소에 mempool 을 써도 조용히 무시한다", () => {
+  Store.close();
+  assert.deepStrictEqual(Store.loadMempool(), []);
+  Store.saveMempool([{ id: "a" }]);
+});
+
 test("append 한 블록을 그대로 읽어 온다", () => {
   const dir = tmpDir();
   Store.open(dir);

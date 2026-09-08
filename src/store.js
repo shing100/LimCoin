@@ -18,12 +18,14 @@ const fs = require("fs"),
   os = require("os");
 
 const BLOCKS_FILE = "blocks.jsonl";
+const MEMPOOL_FILE = "mempool.jsonl";
 
 // open() 을 부르기 전에는 아무것도 저장하지 않는다.
 // 테스트는 open() 을 부르지 않으므로 디스크를 건드리지 않는다.
 let dir = null;
 
 const blocksPath = () => path.join(dir, BLOCKS_FILE);
+const mempoolPath = () => path.join(dir, MEMPOOL_FILE);
 
 // 노드마다 다른 디렉터리를 써야 한 대에서 여러 노드를 띄울 수 있다.
 const defaultDir = () =>
@@ -48,28 +50,30 @@ const isOpen = () => dir !== null;
  * 마지막 줄은 append 도중 죽었을 수 있어 깨져 있을 수 있다. 그런 줄은
  * 버리고 거기까지만 돌려준다 — 어차피 P2P 로 다시 받아 오면 된다.
  */
-const loadBlocks = () => {
-  if (!isOpen() || !fs.existsSync(blocksPath())) {
+const readLines = (file, what) => {
+  if (!fs.existsSync(file)) {
     return [];
   }
   const lines = fs
-    .readFileSync(blocksPath(), "utf8")
+    .readFileSync(file, "utf8")
     .split("\n")
     .filter(line => line.trim() !== "");
 
-  const blocks = [];
+  const parsed = [];
   for (const line of lines) {
     try {
-      blocks.push(JSON.parse(line));
+      parsed.push(JSON.parse(line));
     } catch (e) {
       console.log(
-        `저장된 체인의 ${blocks.length + 1}번째 줄이 깨져 있습니다. 여기까지만 복원합니다.`
+        `${what}의 ${parsed.length + 1}번째 줄이 깨져 있습니다. 여기까지만 복원합니다.`
       );
       break;
     }
   }
-  return blocks;
+  return parsed;
 };
+
+const loadBlocks = () => (isOpen() ? readLines(blocksPath(), "저장된 체인") : []);
 
 const appendBlock = block => {
   if (!isOpen()) {
@@ -80,13 +84,47 @@ const appendBlock = block => {
 
 // 체인이 통째로 교체될 때(reorg). 임시 파일에 쓰고 rename 해서
 // 도중에 죽어도 반쯤 쓰인 파일이 남지 않게 한다.
+const writeAtomically = (file, rows) => {
+  const tmp = file + ".tmp";
+  const body = rows.length === 0 ? "" : rows.map(r => JSON.stringify(r)).join(os.EOL) + os.EOL;
+  fs.writeFileSync(tmp, body);
+  fs.renameSync(tmp, file);
+};
+
 const writeBlocks = blocks => {
   if (!isOpen()) {
     return;
   }
-  const tmp = blocksPath() + ".tmp";
-  fs.writeFileSync(tmp, blocks.map(b => JSON.stringify(b)).join(os.EOL) + os.EOL);
-  fs.renameSync(tmp, blocksPath());
+  writeAtomically(blocksPath(), blocks);
 };
 
-module.exports = { open, close, isOpen, loadBlocks, appendBlock, writeBlocks, defaultDir };
+/*
+ * 아직 블록에 담기지 않은 트랜잭션(mempool)도 저장한다.
+ *
+ * 예전에는 메모리에만 있었다. 노드를 재시작하면 대기 중이던 트랜잭션이
+ * 그대로 사라졌고, 보낸 사람은 영문도 모른 채 다시 보내야 했다.
+ * 비트코인 코어도 같은 이유로 mempool.dat 에 저장해 둔다.
+ *
+ * 블록과 달리 append-only 가 아니다 — 블록이 붙을 때마다 담긴 것이
+ * 빠지므로 그때그때 통째로 다시 쓴다. 500건이 상한이라 부담이 없다.
+ */
+const loadMempool = () => (isOpen() ? readLines(mempoolPath(), "저장된 mempool") : []);
+
+const saveMempool = txs => {
+  if (!isOpen()) {
+    return;
+  }
+  writeAtomically(mempoolPath(), txs);
+};
+
+module.exports = {
+  open,
+  close,
+  isOpen,
+  loadBlocks,
+  appendBlock,
+  writeBlocks,
+  loadMempool,
+  saveMempool,
+  defaultDir
+};

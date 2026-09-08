@@ -22,6 +22,23 @@ const ec = new elliptic.ec("secp256k1");
 const INITIAL_SUBSIDY = 10 * COIN;
 const HALVING_INTERVAL = 210000;
 
+/*
+ * 코인베이스 성숙도.
+ *
+ * 갓 만들어진 코인베이스 출력은 바로 쓸 수 없다. 체인이 갈라져 그 블록이
+ * 밀려나면 코인베이스는 통째로 사라지고, 그것을 쓴 트랜잭션도 전부 무효가
+ * 된다 — 그 코인을 받은 사람은 영문도 모르고 잃는다. 일반 트랜잭션은
+ * 밀려나도 mempool 로 되돌아가 다시 담기지만 코인베이스는 그럴 수 없다.
+ *
+ * 비트코인은 100블록(약 16시간)을 기다리게 한다. 재구성은 보통 1~2블록
+ * 깊이이므로 그만큼이면 사실상 확정이라는 것이다.
+ *
+ * 여기서는 10으로 둔다. 블록 주기가 10초라 100이면 실습에서 17분을
+ * 기다려야 하고, 재구성 깊이에 견주면 10도 충분히 깊다. 난이도 조정
+ * 주기와 같은 값이라 기억하기도 좋다.
+ */
+const COINBASE_MATURITY = 10;
+
 // 블록에 담을 수 있는 트랜잭션 수 상한(코인베이스 포함).
 // 예전에는 mempool 전체를 그대로 담아서 스팸을 막을 방법이 없었다.
 const MAX_TXS_PER_BLOCK = 100;
@@ -77,14 +94,39 @@ class Transaction {
   // txOuts[]
 }
 
+/*
+ * blockIndex 는 이 출력이 만들어진 블록의 높이다. mempool 이 만든 출력은
+ * 아직 블록이 없으므로 null 이다. coinbase 는 성숙도 검사에 쓴다 —
+ * 그 둘이 없으면 "얼마나 깊이 묻혔는지"를 알 수 없다.
+ */
 class UTxOut {
-  constructor(txOutId, txOutIndex, address, amount) {
+  constructor(txOutId, txOutIndex, address, amount, blockIndex = null, coinbase = false) {
     this.txOutId = txOutId;
     this.txOutIndex = txOutIndex;
     this.address = address;
     this.amount = amount;
+    this.blockIndex = blockIndex;
+    this.coinbase = coinbase;
   }
 }
+
+// 코인베이스는 이전 출력을 가리키지 않는 유일한 트랜잭션이다
+const isCoinbaseTx = tx =>
+  tx.txIns.length === 1 && tx.txIns[0].txOutId === "";
+
+/*
+ * 코인베이스 출력이 spendHeight 높이에서 쓸 수 있을 만큼 묻혔는가.
+ * 높이를 모르면 쓸 수 없는 것으로 본다 — 모른 채 통과시키느니 막는다.
+ */
+const isSpendable = (uTxOut, spendHeight) => {
+  if (uTxOut.coinbase !== true) {
+    return true;
+  }
+  if (!Number.isInteger(spendHeight) || !Number.isInteger(uTxOut.blockIndex)) {
+    return false;
+  }
+  return spendHeight - uTxOut.blockIndex >= COINBASE_MATURITY;
+};
 
 // tx id 가져오기
 const getTxId = tx => {
@@ -141,11 +183,19 @@ const getPublicKey = privateKey => {
     .encode("hex");
 };
 
-const updateUTxOuts = (newTxs, uTxOutList) => {
+const updateUTxOuts = (newTxs, uTxOutList, blockIndex = null) => {
   const newUTxOuts = newTxs
     .map(tx =>
       tx.txOuts.map(
-        (txOut, index) => new UTxOut(tx.id, index, txOut.address, txOut.amount)
+        (txOut, index) =>
+          new UTxOut(
+            tx.id,
+            index,
+            txOut.address,
+            txOut.amount,
+            blockIndex,
+            isCoinbaseTx(tx)
+          )
       )
     )
     .reduce((a, b) => a.concat(b), []);
@@ -257,10 +307,16 @@ const isTxStructureValid = tx => {
   }
 };
 
-const validateTxIn = (txIn, tx, uTxOuts) => {
+const validateTxIn = (txIn, tx, uTxOuts, spendHeight) => {
   const wantedTxOut = findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOuts);
   if (wantedTxOut === undefined) {
     console.log(`Didn't find the wanted uTxOut, the tx: ${tx} is invalid`);
+    return false;
+  } else if (!isSpendable(wantedTxOut, spendHeight)) {
+    console.log(
+      `코인베이스 출력은 ${COINBASE_MATURITY}블록이 쌓여야 쓸 수 있습니다 ` +
+        `(만들어진 높이 ${wantedTxOut.blockIndex}, 쓰려는 높이 ${spendHeight})`
+    );
     return false;
   } else {
     const address = wantedTxOut.address;
@@ -299,7 +355,7 @@ const getTxFee = (tx, uTxOuts) => sumTxIns(tx, uTxOuts) - sumTxOuts(tx);
 
 // 블록 단위로 검증할 때는 색인을 한 번만 만들어 돌려 쓴다.
 // 낱개로 부를 때는 기본값이 알아서 만든다(기본 인자는 필요할 때만 계산된다).
-const validateTx = (tx, uTxOutList, uTxOuts = indexByOutpoint(uTxOutList)) => {
+const validateTx = (tx, uTxOutList, uTxOuts = indexByOutpoint(uTxOutList), spendHeight) => {
   if (!isTxStructureValid(tx)) {
     console.log("Tx structure is invalid");
     return false;
@@ -311,7 +367,7 @@ const validateTx = (tx, uTxOutList, uTxOuts = indexByOutpoint(uTxOutList)) => {
   }
 
   const hasValidTxIns = tx.txIns
-    .map(txIn => validateTxIn(txIn, tx, uTxOuts))
+    .map(txIn => validateTxIn(txIn, tx, uTxOuts, spendHeight))
     .every(isValid => isValid === true);
 
   if (!hasValidTxIns) {
@@ -390,14 +446,14 @@ const hasDuplicates = txIns => {
  * 트랜잭션 하나를 색인에 반영한다. 쓴 것은 빼고 만든 것은 넣는다.
  * 블록을 검증하는 동안 뒤 트랜잭션이 앞 트랜잭션의 출력을 볼 수 있게 한다.
  */
-const applyTxToIndex = (tx, uTxOuts) => {
+const applyTxToIndex = (tx, uTxOuts, blockIndex = null) => {
   for (const txIn of tx.txIns) {
     uTxOuts.delete(keyOf(txIn.txOutId, txIn.txOutIndex));
   }
   tx.txOuts.forEach((txOut, index) => {
     uTxOuts.set(
       keyOf(tx.id, index),
-      new UTxOut(tx.id, index, txOut.address, txOut.amount)
+      new UTxOut(tx.id, index, txOut.address, txOut.amount, blockIndex, isCoinbaseTx(tx))
     );
   });
 };
@@ -470,13 +526,13 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
   const uTxOuts = indexByOutpoint(uTxOutList);
   let totalFees = 0;
   for (const tx of nonCoinbaseTxs) {
-    if (!validateTx(tx, uTxOutList, uTxOuts)) {
+    if (!validateTx(tx, uTxOutList, uTxOuts, blockIndex)) {
       console.log(`The tx ${tx.id} in this block is invalid`);
       return false;
     }
     // 수수료는 입력을 걷어 내기 전에 구해야 한다
     totalFees += getTxFee(tx, uTxOuts);
-    applyTxToIndex(tx, uTxOuts);
+    applyTxToIndex(tx, uTxOuts, blockIndex);
   }
 
   if (!validateCoinbaseTx(txs[0], blockIndex, totalFees)) {
@@ -492,7 +548,7 @@ const processTxs = (txs, uTxOutList, blockIndex) => {
   if (!validateBlockTxs(txs, uTxOutList, blockIndex)) {
     return null;
   }
-  return updateUTxOuts(txs, uTxOutList);
+  return updateUTxOuts(txs, uTxOutList, blockIndex);
 };
 
 /*
@@ -557,6 +613,9 @@ module.exports = {
   HALVING_INTERVAL,
   INITIAL_SUBSIDY,
   MAX_TXS_PER_BLOCK,
+  COINBASE_MATURITY,
+  isCoinbaseTx,
+  isSpendable,
   getTxId,
   signTxIn,
   TxIn,
