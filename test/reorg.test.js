@@ -25,7 +25,7 @@ const { toHexString } = require("../src/utils");
 const { COIN } = require("../src/units");
 
 const ec = new elliptic.ec("secp256k1");
-const newAddress = () => ec.genKeyPair().getPublic().encode("hex");
+const { newAddress } = require("./helpers");
 
 /* ------------------------------------------- undo 데이터 자체 */
 
@@ -101,35 +101,8 @@ const genesis = require("../src/genesis.json");
 
 const { getBlockChain, addBlockToChain, replaceChain, getUTxOutList, difficultyForNext } = Blockchain;
 
+const { mineOnto, coinbaseBlockOnto } = require("./helpers");
 const now = Math.round(Date.now() / 1000);
-
-// 실제로 nonce 를 찾아 블록을 만든다. 제네시스 난이도(15) 기준 수만 번이면 된다.
-const mineOnto = (previousBlock, data, offset = 0) => {
-  const index = previousBlock.index + 1;
-  const timestamp = now + offset;
-  const merkleRoot = getMerkleRoot(data);
-  const difficulty = previousBlock.difficulty;
-  const header = { index, previousHash: previousBlock.hash, timestamp, merkleRoot, difficulty };
-
-  for (let from = 0; ; from += 200000) {
-    const found = PoW.findNonce(header, from, 200000);
-    if (found !== null) {
-      return {
-        index,
-        hash: found.hash,
-        previousHash: previousBlock.hash,
-        timestamp,
-        merkleRoot,
-        data,
-        difficulty,
-        nonce: found.nonce
-      };
-    }
-  }
-};
-
-const coinbaseBlockOnto = (previousBlock, address, offset) =>
-  mineOnto(previousBlock, [createCoinbaseTx(address, previousBlock.index + 1, 0)], offset);
 
 test("갈라진 체인으로 갈아 끼워도 UTxOut 과 주소 색인이 재생한 것과 같다", () => {
   // 우리 체인: genesis - A1 - A2 - A3

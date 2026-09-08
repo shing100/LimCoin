@@ -10,6 +10,25 @@ const MAX_MEMPOOL_SIZE = 500;
 let mempool = [];
 
 /*
+ * mempool 이 바뀔 때 알려 줄 곳. blockchain.js 가 저장을 걸어 둔다.
+ * 여기서 직접 저장하지 않는 것은, 이 모듈이 저장소나 체인을 몰라야 하기
+ * 때문이다 — 그래야 테스트가 디스크 없이 돈다.
+ */
+let listeners = [];
+const onChange = listener => {
+  listeners.push(listener);
+};
+const notifyChange = () => {
+  for (const listener of listeners) {
+    try {
+      listener();
+    } catch (e) {
+      console.log(`mempool 변경 알림 처리 중 문제: ${e.message}`);
+    }
+  }
+};
+
+/*
  * mempool 사본.
  *
  * 얕은 복사다. 배열만 새로 만들고 트랜잭션 객체는 그대로 넘긴다.
@@ -56,9 +75,13 @@ const isTxValidForPool = (tx, pool) => {
 const updateMempool = uTxOutList => {
   const unspent = indexByOutpoint(uTxOutList);
 
+  const before = mempool.length;
   mempool = mempool.filter(tx =>
     tx.txIns.every(txIn => unspent.has(keyOf(txIn.txOutId, txIn.txOutIndex)))
   );
+  if (mempool.length !== before) {
+    notifyChange();
+  }
 };
 
 /*
@@ -102,6 +125,7 @@ const addToMempool = (tx, uTxOutList, spendHeight) => {
     throw Error("This tx is invalid. Will not add it to pool");
   }
   mempool.push(tx);
+  notifyChange();
 };
 
 /*
@@ -214,6 +238,7 @@ module.exports = {
   addToMempool,
   getSpendableUTxOuts,
   getMatureUTxOuts,
+  onChange,
   getMempool,
   updateMempool,
   selectTxsForBlock,
