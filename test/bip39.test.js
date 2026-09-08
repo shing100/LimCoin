@@ -7,6 +7,7 @@ const assert = require("node:assert");
 const BIP39 = require("../src/bip39");
 const HD = require("../src/hdwallet");
 const PoW = require("../src/pow");
+const Target = require("../src/target");
 const WORDLIST = require("../src/bip39-wordlist");
 
 /* ------------------------------------------------ 공식 테스트 벡터 */
@@ -138,42 +139,42 @@ test("니모닉에서 BIP32 주소까지 이어진다", () => {
 
 /* ------------------------------------------------------ 작업증명 */
 
-test("찾은 nonce 는 난이도 조건을 만족한다", () => {
+test("찾은 nonce 는 목표값 조건을 만족한다", () => {
   const header = {
+    version: 1,
     index: 1,
     previousHash: "aa".repeat(32),
     timestamp: 1700000000,
     merkleRoot: "bb".repeat(32),
-    difficulty: 10
+    bits: Target.bitsFromTarget((1n << 246n) - 1n) // 평균 1024회
   };
   const found = PoW.findNonce(header, 0, 200000);
-  assert.ok(found, "난이도 10 이면 평균 1024회 안에 찾힌다");
-  assert.strictEqual(
-    PoW.createHash(
-      header.index, header.previousHash, header.timestamp,
-      header.merkleRoot, header.difficulty, found.nonce
-    ),
-    found.hash
-  );
-  assert.strictEqual(PoW.hashMatchesDifficulty(found.hash, 10), true);
+  assert.ok(found, "목표값 2^246 이면 평균 1024회 안에 찾힌다");
+  assert.strictEqual(PoW.createHash({ ...header, nonce: found.nonce }), found.hash);
+  assert.strictEqual(PoW.hashMeetsBits(found.hash, header.bits), true);
+  assert.ok(BigInt("0x" + found.hash) <= Target.targetFromBits(header.bits));
 });
 
 test("예산 안에서 못 찾으면 null 을 돌려준다", () => {
   // 부르는 쪽이 중간에 중단 신호를 볼 수 있게 하기 위한 것이다
   const header = {
+    version: 1,
     index: 1,
     previousHash: "aa".repeat(32),
     timestamp: 1700000000,
     merkleRoot: "bb".repeat(32),
-    difficulty: 32 // 사실상 못 찾는 난이도
+    bits: 0x01010000 // target 1 — 사실상 못 찾는다
   };
   assert.strictEqual(PoW.findNonce(header, 0, 100), null);
 });
 
-test("난이도가 높을수록 조건이 좁아진다", () => {
+test("목표값이 작을수록 조건이 좁아진다", () => {
   const hash = "0".repeat(4) + "f".repeat(60); // 앞 16비트가 0
-  assert.strictEqual(PoW.hashMatchesDifficulty(hash, 16), true);
-  assert.strictEqual(PoW.hashMatchesDifficulty(hash, 17), false);
+  assert.strictEqual(PoW.hashMeetsBits(hash, Target.bitsFromTarget(1n << 240n)), true);
+  assert.strictEqual(PoW.hashMeetsBits(hash, Target.bitsFromTarget((1n << 240n) - 1n)), false, "target 보다 크면 실패");
+  assert.strictEqual(PoW.hashMeetsBits(hash, Target.POW_LIMIT_BITS), true);
+  assert.strictEqual(PoW.hashMeetsBits("f".repeat(64), Target.POW_LIMIT_BITS), false);
+  assert.strictEqual(PoW.hashMeetsBits("0".repeat(64), 0x01010000), true, "0 은 어떤 목표값도 만족한다");
 });
 
 /* ------------------------------------------- 니모닉으로 지갑 복구 */

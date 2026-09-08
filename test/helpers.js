@@ -49,35 +49,44 @@ const fakeId = label =>
 
 const now = () => Math.round(Date.now() / 1000);
 
-// previousBlock 위에 data 를 담은 블록을 실제로 채굴한다.
-// offset 은 타임스탬프를 몇 초 뒤로 둘지 — 같은 초에 여러 블록을 만들 때 MTP 를 넘기려는 것.
-// difficulty 를 주지 않으면 직전 블록과 같게 한다 (난이도 조정 높이를 지나지 않을 때만 맞다).
-const mineOnto = (previousBlock, data, offset = 0, difficulty = previousBlock.difficulty) => {
+// mineOnto 가 쓰는 타임스탬프 — bits 를 정할 때 같은 값을 쓰려고 밖에서도 부른다
+const timestampFor = (previousBlock, offset = 0) =>
+  Math.max(now() + offset, previousBlock.timestamp + 1);
+
+// previousBlock 위에 data 를 담은, 타임스탬프가 timestamp 인 블록을 실제로 채굴한다.
+// bits 를 주지 않으면 직전 블록과 같게 한다 (처음 lwmaWindow 블록 안, 메인넷에서만 맞다).
+const mineOntoAt = (previousBlock, data, timestamp, bits = previousBlock.bits) => {
   const index = previousBlock.index + 1;
-  const timestamp = Math.max(now() + offset, previousBlock.timestamp + 1);
   const merkleRoot = getMerkleRoot(data);
-  const header = { index, previousHash: previousBlock.hash, timestamp, merkleRoot, difficulty };
+  const header = { version: 1, index, previousHash: previousBlock.hash, timestamp, merkleRoot, bits };
 
   for (let from = 0; ; from += 200000) {
     const found = PoW.findNonce(header, from, 200000);
     if (found !== null) {
       return {
+        version: 1,
         index,
         hash: found.hash,
         previousHash: previousBlock.hash,
         timestamp,
         merkleRoot,
         data,
-        difficulty,
+        bits,
         nonce: found.nonce
       };
     }
   }
 };
 
+// offset 은 타임스탬프를 지금에서 몇 초 뒤로 둘지 — 같은 초에 여러 블록을 만들 때 MTP 를 넘기려는 것.
+const mineOnto = (previousBlock, data, offset = 0, bits) =>
+  mineOntoAt(previousBlock, data, timestampFor(previousBlock, offset), bits);
+
 // 코인베이스 하나만 든 블록
-const coinbaseBlockOnto = (previousBlock, address = newAddress(), offset = 0, difficulty) =>
-  mineOnto(previousBlock, [createCoinbaseTx(address, previousBlock.index + 1, 0)], offset, difficulty);
+const coinbaseBlockOnto = (previousBlock, address = newAddress(), offset = 0, bits) =>
+  mineOnto(previousBlock, [createCoinbaseTx(address, previousBlock.index + 1, 0)], offset, bits);
+const coinbaseBlockOntoAt = (previousBlock, address = newAddress(), timestamp, bits) =>
+  mineOntoAt(previousBlock, [createCoinbaseTx(address, previousBlock.index + 1, 0)], timestamp, bits);
 
 /*
  * previousBlock 위에 n 개를 이어 채굴한다.
@@ -102,14 +111,18 @@ const mineChainOnto = (previousBlock, n, offset = 0, base) => {
   const blocks = [];
   let tip = previousBlock;
   for (let i = 0; i < n; i++) {
-    const difficulty = chainSoFar.length > 1 || chainSoFar[0].index === 0
-      ? Blockchain.difficultyForNext(chainSoFar)
-      : tip.difficulty;
-    tip = coinbaseBlockOnto(tip, newAddress(), offset + i * 10, difficulty);
+    const timestamp = timestampFor(tip, offset + i * 10);
+    const bits = chainSoFar.length > 1 || chainSoFar[0].index === 0
+      ? Blockchain.bitsForNext(chainSoFar, timestamp)
+      : tip.bits;
+    tip = coinbaseBlockOnto(tip, newAddress(), offset + i * 10, bits);
     blocks.push(tip);
     chainSoFar = chainSoFar.concat([tip]);
   }
   return blocks;
 };
 
-module.exports = { ecShim, keyPairFrom, fakeId, newAddress, mineOnto, coinbaseBlockOnto, mineChainOnto };
+module.exports = {
+  ecShim, keyPairFrom, fakeId, newAddress, timestampFor,
+  mineOnto, mineOntoAt, coinbaseBlockOnto, coinbaseBlockOntoAt, mineChainOnto
+};

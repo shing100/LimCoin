@@ -14,7 +14,9 @@ const {
   getBlockSubsidy
 } = require("../src/transactions");
 const { toHexString } = require("../src/utils");
-const { calculateNewDifficulty, difficultyForNext, replaceChain } = require("../src/blockchain");
+const { bitsForNext, replaceChain, getBlockChain } = require("../src/blockchain");
+const Target = require("../src/target");
+const Params = require("../src/params");
 const genesis = require("../src/genesis.json");
 
 const { ecShim: ec, fakeId } = require("./helpers");
@@ -151,59 +153,93 @@ test("빈 블록은 거부된다", () => {
   assert.strictEqual(processTxs([], [], 1), null);
 });
 
-test("난이도는 너무 빠르면 올라가고 너무 느리면 내려간다", () => {
-  // 기대 간격 = BLOCK_GENERATION_INTERVAL(10) * DIFFICULTY_ADJUSMENT_INTERVAL(10) = 100초
-  // 10블록이 걸린 시간은 index-10 블록의 타임스탬프에서 끝 블록까지다.
-  // 그래서 체인은 창 시작 블록 + 10블록 = 11개다.
-  const chainWith = (elapsed, difficulty) => {
-    const chain = [];
-    for (let i = 0; i <= 10; i++) {
-      chain.push({ index: i, difficulty, timestamp: 1000 + Math.round(elapsed * i / 10) });
-    }
-    const newest = chain[10];
-    assert.strictEqual(newest.timestamp, 1000 + elapsed);
-    return { newest, chain };
-  };
+/* ------------------------------------------- 목표값 (LWMA) */
 
-  // 50초 미만 -> 난이도 상승
-  let { newest, chain } = chainWith(10, 15);
-  assert.strictEqual(calculateNewDifficulty(newest, chain), 16);
+const GENESIS_BITS = getBlockChain()[0].bits;
+const N = Params.current().lwmaWindow;
 
-  // 200초 초과 -> 난이도 하락
-  ({ newest, chain } = chainWith(500, 15));
-  assert.strictEqual(calculateNewDifficulty(newest, chain), 14);
+// index 0..count-1, 간격 spacing 초, 모두 같은 bits 인 가짜 체인
+const syntheticChain = (count, spacing, bits = GENESIS_BITS) => {
+  const chain = [];
+  for (let i = 0; i < count; i++) {
+    chain.push({ index: i, timestamp: 1000 + i * spacing, bits });
+  }
+  return chain;
+};
 
-  // 기대 시간(100초)대로 채굴하면 유지되어야 한다.
-  // 수정 전에는 timeExpected/2 비교라 여기서도 난이도가 계속 떨어졌다.
-  ({ newest, chain } = chainWith(100, 15));
-  assert.strictEqual(calculateNewDifficulty(newest, chain), 15);
+test("처음 lwmaWindow 블록은 제네시스의 목표값을 그대로 쓴다", () => {
+  assert.strictEqual(bitsForNext(syntheticChain(1, 10)), GENESIS_BITS);
+  assert.strictEqual(bitsForNext(syntheticChain(N, 1)), GENESIS_BITS, "아무리 빨라도 조정 전이다");
+  assert.strictEqual(bitsForNext(syntheticChain(N, 1000)), GENESIS_BITS);
+});
 
-  // 창은 정확히 10블록이다. index-10 블록만 빨라도(창 밖) 결과가 바뀌면 안 된다.
-  ({ newest, chain } = chainWith(100, 15));
-  chain.unshift({ index: -1, difficulty: 15, timestamp: 0 });
-  assert.strictEqual(calculateNewDifficulty(newest, chain), 15);
+test("목표 간격(10초)대로 나오면 목표값이 유지된다", () => {
+  assert.strictEqual(bitsForNext(syntheticChain(N + 1, 10)), GENESIS_BITS);
+  assert.strictEqual(bitsForNext(syntheticChain(N + 40, 10)), GENESIS_BITS);
+});
+
+test("블록이 너무 빨리 나오면 목표값이 줄고(어려워지고), 느리면 늘어난다", () => {
+  const fast = bitsForNext(syntheticChain(N + 1, 1));
+  const slow = bitsForNext(syntheticChain(N + 1, 30));
+  assert.ok(Target.targetFromBits(fast) < Target.targetFromBits(GENESIS_BITS));
+  assert.ok(Target.targetFromBits(slow) > Target.targetFromBits(GENESIS_BITS));
+  // 1초마다 나왔으면 10배 어려워져야 맞다(LWMA 는 비율로 고친다)
+  const ratio = Target.difficultyOf(fast) / Target.difficultyOf(GENESIS_BITS);
+  assert.ok(ratio > 9.5 && ratio < 10.5, `10배여야 한다: ${ratio}`);
+});
+
+test("풀이 시간은 [1, 6T] 로 잘린다 — 한 시간 비어도 60초로 친다", () => {
+  const hour = bitsForNext(syntheticChain(N + 1, 3600));
+  const minute = bitsForNext(syntheticChain(N + 1, 60));
+  assert.strictEqual(hour, minute);
+  // 시간을 앞당겨 적어 풀이 시간을 음수로 만들면 1초로 친다 — 난이도가 올라가는 쪽(공격자 손해)
+  const backwards = syntheticChain(N + 1, 10);
+  backwards[N].timestamp = backwards[N - 1].timestamp - 500;
+  const oneSecond = syntheticChain(N + 1, 10);
+  oneSecond[N].timestamp = oneSecond[N - 1].timestamp + 1;
+  assert.strictEqual(bitsForNext(backwards), bitsForNext(oneSecond));
+});
+
+test("목표값은 바닥(POW_LIMIT)을 넘지 못한다", () => {
+  const easy = bitsForNext(syntheticChain(N + 1, 60, Target.POW_LIMIT_BITS));
+  assert.strictEqual(easy, Target.POW_LIMIT_BITS);
+});
+
+test("최근 블록에 더 큰 가중치를 준다", () => {
+  // 같은 블록들이라도 느린 블록이 창의 끝에 있을 때 목표값이 더 많이 늘어난다
+  const slowLast = syntheticChain(N + 1, 10);
+  for (let i = 1; i <= N; i++) slowLast[i].timestamp = slowLast[i - 1].timestamp + (i === N ? 60 : 10);
+  const slowFirst = syntheticChain(N + 1, 10);
+  for (let i = 1; i <= N; i++) slowFirst[i].timestamp = slowFirst[i - 1].timestamp + (i === 1 ? 60 : 10);
+  assert.ok(Target.targetFromBits(bitsForNext(slowLast)) > Target.targetFromBits(bitsForNext(slowFirst)));
 });
 
 test("메인넷은 블록 사이가 아무리 벌어져도 최소 난이도 블록을 받지 않는다", () => {
   // 테스트넷의 20배 규칙(test/testnet.test.js)은 메인넷에 없다.
   // 시간을 앞당겨 적은 채굴자가 난이도를 피할 수 있으므로.
-  const chain = [
-    { index: 0, difficulty: 15, timestamp: 1000 },
-    { index: 1, difficulty: 15, timestamp: 1010 }
-  ];
-  assert.strictEqual(difficultyForNext(chain, 1010 + 201), 15);
-  assert.strictEqual(difficultyForNext(chain, 1010 + 24 * 3600), 15);
-  assert.strictEqual(difficultyForNext(chain), 15);
+  const chain = syntheticChain(2, 10);
+  assert.strictEqual(bitsForNext(chain, 1010 + 201), GENESIS_BITS);
+  assert.strictEqual(bitsForNext(chain, 1010 + 24 * 3600), GENESIS_BITS);
 });
 
-test("난이도는 1 아래로 내려가지 않는다", () => {
-  // difficulty 0 이면 "0".repeat(0) === "" 라 어떤 해시든 통과해 버린다.
-  const chain = [];
-  for (let i = 0; i <= 10; i++) {
-    chain.push({ index: i, difficulty: 1, timestamp: 1000 + i * 500 });
-  }
-  const newest = chain[10];
-  assert.strictEqual(calculateNewDifficulty(newest, chain), 1);
+test("bits 압축 표기는 비트코인과 같다", () => {
+  // 비트코인 제네시스 nBits 0x1d00ffff -> target 0x00000000ffff0000...0000
+  assert.strictEqual(
+    Target.targetHex(0x1d00ffff),
+    "00000000ffff0000000000000000000000000000000000000000000000000000"
+  );
+  assert.strictEqual(Target.bitsFromTarget(Target.targetFromBits(0x1d00ffff)), 0x1d00ffff);
+  // 가수 첫 비트가 1이면 한 바이트 밀어 표기한다 (0x00800000 은 음수 표시)
+  assert.strictEqual(Target.bitsFromTarget(0x800000n), 0x04008000);
+  assert.strictEqual(Target.targetFromBits(0x04008000), 0x800000n);
+  // 음수 비트, 가수 0, 바닥보다 쉬운 값은 유효하지 않다
+  assert.strictEqual(Target.isValidBits(0x03800001), false);
+  assert.strictEqual(Target.isValidBits(0x1d000000), false);
+  assert.strictEqual(Target.isValidBits(0x20ffffff), false);
+  assert.strictEqual(Target.isValidBits(Target.POW_LIMIT_BITS), true);
+  // 무게 = 2^256 / (target+1). 제네시스 목표값(≈2^241)은 평균 2^15 번
+  assert.strictEqual(Target.workOf(GENESIS_BITS), 32768n);
+  assert.ok(Math.abs(Target.difficultyOf(GENESIS_BITS) - 16384) < 1);
 });
 
 test("replaceChain 은 잘못된 체인을 받아도 예외 없이 false 를 돌려준다", () => {

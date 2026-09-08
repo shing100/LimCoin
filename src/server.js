@@ -11,6 +11,7 @@ const express = require("express"),
     AddressIndex = require("./addressIndex"),
     ChainIndex = require("./chainIndex"),
     Params = require("./params"),
+    Target = require("./target"),
     crypto = require("crypto");
 
 const {
@@ -396,8 +397,8 @@ app.get("/metrics", (req, res) => {
   const newest = getNewestBlock();
   const lines = [
     "# TYPE limcoin_height gauge", `limcoin_height ${newest.index}`,
-    "# TYPE limcoin_difficulty gauge", `limcoin_difficulty ${newest.difficulty}`,
-    "# TYPE limcoin_chain_work gauge", `limcoin_chain_work ${chainWork(getBlockChain())}`,
+    "# TYPE limcoin_difficulty gauge", `limcoin_difficulty ${Target.difficultyOf(newest.bits)}`,
+    "# TYPE limcoin_chain_work gauge", `limcoin_chain_work ${chainWork(getBlockChain()).toString()}`,
     "# TYPE limcoin_tip_age_seconds gauge", `limcoin_tip_age_seconds ${Math.round(Date.now() / 1000) - newest.timestamp}`,
     "# TYPE limcoin_peers gauge", `limcoin_peers ${getPeers().length}`,
     "# TYPE limcoin_mempool_size gauge", `limcoin_mempool_size ${getMempool().length}`,
@@ -582,7 +583,11 @@ app.get("/info", (req, res) => {
 
   res.send({
     height: newest.index,
-    difficulty: newest.difficulty,
+    // 사람이 읽는 난이도(바닥 = 1, 실수). 합의에 쓰이는 값은 bits/target 이다.
+    difficulty: Target.difficultyOf(newest.bits),
+    bits: newest.bits,
+    target: Target.targetHex(newest.bits),
+    blockVersion: newest.version,
     txCount,
     supply,
     mempoolSize: mempool.length,
@@ -607,7 +612,7 @@ app.get("/info", (req, res) => {
     network: Params.current().name,
     addressVersion: Params.current().addressVersion,
     genesisHash: getBlockChain()[0].hash,
-    chainWork: chainWork(getBlockChain()),
+    chainWork: chainWork(getBlockChain()).toString(),
     walletEnabled: Wallet.isEnabled(),
     version: VERSION
   });

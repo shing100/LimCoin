@@ -10,18 +10,28 @@ const assert = require("node:assert");
 
 const Params = require("../src/params");
 const Address = require("../src/address");
+const Target = require("../src/target");
 const {
-  difficultyForNext,
-  lastRealDifficulty,
+  bitsForNext,
   isHeaderValid,
   headerOf,
   getBlockChain,
-  MIN_DIFFICULTY,
   BlOCK_GENERATION_INTERVAL
 } = require("../src/blockchain");
 const { coinbaseBlockOnto } = require("./helpers");
 
 const GAP = BlOCK_GENERATION_INTERVAL * 20; // 200초
+const GENESIS_BITS = getBlockChain()[0].bits;
+const N = Params.current().lwmaWindow;
+const MIN = Target.POW_LIMIT_BITS;
+
+const syntheticChain = (count, spacing) => {
+  const chain = [];
+  for (let i = 0; i < count; i++) {
+    chain.push({ index: i, timestamp: 1000 + i * spacing, bits: GENESIS_BITS });
+  }
+  return chain;
+};
 
 test("테스트넷은 제네시스, 주소 버전, 매직이 메인넷과 다르다", () => {
   const params = Params.current();
@@ -30,6 +40,7 @@ test("테스트넷은 제네시스, 주소 버전, 매직이 메인넷과 다르
   assert.strictEqual(params.magic, "limcoin/test/1");
   assert.strictEqual(params.allowMinDifficultyBlocks, true);
   assert.strictEqual(Params.NETWORKS.mainnet.allowMinDifficultyBlocks, false);
+  assert.strictEqual(Params.NETWORKS.regtest.magic, "limcoin/regtest/1");
 
   const genesis = getBlockChain()[0];
   assert.strictEqual(genesis.hash, require("../src/genesis.testnet.json").hash);
@@ -41,63 +52,46 @@ test("테스트넷은 제네시스, 주소 버전, 매직이 메인넷과 다르
   assert.strictEqual(Address.isAddressValid(address, 0x30), false);
 });
 
-test("직전 블록 뒤로 200초가 넘게 지났으면 기대 난이도는 최소 난이도다", () => {
-  const chain = [
-    { index: 0, difficulty: 15, timestamp: 1000 },
-    { index: 1, difficulty: 15, timestamp: 1010 }
-  ];
+test("직전 블록 뒤로 200초가 넘게 지났으면 기대 목표값은 바닥(최소 난이도)이다", () => {
+  const chain = syntheticChain(2, 10);
   // 정확히 200초는 아니다 — 초과여야 한다
-  assert.strictEqual(difficultyForNext(chain, 1010 + GAP), 15);
-  assert.strictEqual(difficultyForNext(chain, 1010 + GAP + 1), MIN_DIFFICULTY);
+  assert.strictEqual(bitsForNext(chain, 1010 + GAP), GENESIS_BITS);
+  assert.strictEqual(bitsForNext(chain, 1010 + GAP + 1), MIN);
   // 타임스탬프를 모르면(채굴 전 조회) 규칙을 적용하지 않는다
-  assert.strictEqual(difficultyForNext(chain), 15);
+  assert.strictEqual(bitsForNext(chain), GENESIS_BITS);
 });
 
-test("특별 블록 다음 블록은 원래 난이도로 돌아간다 (난이도를 이어받지 않는다)", () => {
-  const chain = [
-    { index: 0, difficulty: 15, timestamp: 1000 },
-    { index: 1, difficulty: 15, timestamp: 1010 },
-    { index: 2, difficulty: MIN_DIFFICULTY, timestamp: 1010 + GAP + 1 }
-  ];
-  assert.strictEqual(lastRealDifficulty(chain), 15);
-  assert.strictEqual(difficultyForNext(chain, chain[2].timestamp + 10), 15);
-
-  // 특별 블록이 연달아 있어도 그 앞의 진짜 난이도까지 되짚는다
-  const more = chain.concat([
-    { index: 3, difficulty: MIN_DIFFICULTY, timestamp: chain[2].timestamp + GAP + 1 },
-    { index: 4, difficulty: MIN_DIFFICULTY, timestamp: chain[2].timestamp + 2 * GAP + 2 }
-  ]);
-  assert.strictEqual(lastRealDifficulty(more), 15);
-  assert.strictEqual(difficultyForNext(more, more[4].timestamp + 10), 15);
+test("특별 블록 다음 블록은 원래 목표값으로 돌아간다 (조정 전 구간)", () => {
+  const chain = syntheticChain(2, 10);
+  chain.push({ index: 2, timestamp: 1010 + GAP + 1, bits: MIN });
+  assert.strictEqual(bitsForNext(chain, chain[2].timestamp + 10), GENESIS_BITS);
 });
 
-test("조정 높이의 계산도 특별 블록을 건너뛴 난이도를 기준으로 한다", () => {
-  // index 0..10, 그중 5, 7 이 특별 블록. 10블록이 정확히 100초 걸렸으니 유지되어야 한다.
-  const chain = [];
-  for (let i = 0; i <= 10; i++) {
-    chain.push({
-      index: i,
-      difficulty: i === 5 || i === 7 ? MIN_DIFFICULTY : 15,
-      timestamp: 1000 + i * 10
-    });
-  }
-  assert.strictEqual(difficultyForNext(chain, chain[10].timestamp + 10), 15);
+test("LWMA 창 안의 특별 블록은 중립으로 취급되어 난이도를 무너뜨리지 않는다", () => {
+  // 정속(10초) 체인과, 같은 체인에서 블록 하나가 특별 블록(200초 뒤, 바닥 bits)인 것을 비교한다.
+  const steady = syntheticChain(N + 1, 10);
+  const withSpecial = syntheticChain(N + 1, 10);
+  const at = N - 5;
+  withSpecial[at].bits = MIN;
+  // 특별 블록 뒤의 타임스탬프를 모두 GAP+1 만큼 밀어 "200초 뒤" 를 만든다
+  for (let i = at; i <= N; i++) withSpecial[i].timestamp += GAP + 1;
+  assert.strictEqual(bitsForNext(withSpecial), bitsForNext(steady));
+  assert.strictEqual(bitsForNext(steady), GENESIS_BITS);
 });
 
-test("실제 블록: 200초 넘게 비었으면 최소 난이도 블록은 받고 원래 난이도 블록은 거부한다", () => {
+test("실제 블록: 200초 넘게 비었으면 바닥 목표값 블록은 받고 원래 목표값 블록은 거부한다", () => {
   const genesis = getBlockChain()[0];
   // 제네시스 타임스탬프는 과거이므로 지금 채굴하는 블록은 200초 규칙에 걸린다
   assert.ok(Math.round(Date.now() / 1000) > genesis.timestamp + GAP);
 
-  const special = coinbaseBlockOnto(genesis, undefined, 0, MIN_DIFFICULTY);
+  const special = coinbaseBlockOnto(genesis, undefined, 0, MIN);
   assert.strictEqual(isHeaderValid(headerOf(special), [genesis]), true);
 
-  // 같은 자리에 "진짜" 난이도로 채굴한 블록은 기대 난이도(1)와 달라 거부된다
-  // — 난이도는 그 높이의 기대값과 같아야 한다(더 높아도 안 된다)
-  const real = coinbaseBlockOnto(genesis, undefined, 0, genesis.difficulty);
+  // 같은 자리에 "진짜" 목표값으로 채굴한 블록은 기대값(바닥)과 달라 거부된다
+  // — bits 는 그 높이의 기대값과 같아야 한다(더 어려워도 안 된다)
+  const real = coinbaseBlockOnto(genesis, undefined, 0, genesis.bits);
   assert.strictEqual(isHeaderValid(headerOf(real), [genesis]), false);
 
-  // 특별 블록 뒤 10초 뒤의 블록은 제네시스 난이도여야 한다
-  const next = { ...special, timestamp: special.timestamp + 10 };
-  assert.strictEqual(difficultyForNext([genesis, special], next.timestamp), genesis.difficulty);
+  // 특별 블록 뒤 10초 뒤의 블록은 제네시스 목표값이어야 한다
+  assert.strictEqual(bitsForNext([genesis, special], special.timestamp + 10), genesis.bits);
 });

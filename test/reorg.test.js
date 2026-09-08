@@ -98,7 +98,8 @@ const AddressIndex = require("../src/addressIndex");
 const ChainIndex = require("../src/chainIndex");
 const genesis = require("../src/genesis.json");
 
-const { getBlockChain, addBlockToChain, replaceChain, getUTxOutList, difficultyForNext } = Blockchain;
+const { getBlockChain, addBlockToChain, replaceChain, getUTxOutList, bitsForNext } = Blockchain;
+const Target = require("../src/target");
 
 const { mineOnto, coinbaseBlockOnto } = require("./helpers");
 const now = Math.round(Date.now() / 1000);
@@ -220,15 +221,15 @@ test("2시간 넘게 미래인 블록은 거부되고, 1시간은 받아들인�
 
 /* ------------------------------------------- 작업증명 위조 */
 
-test("난이도는 그 높이에서 프로토콜이 정한 값이어야 한다", () => {
+test("목표값(bits)은 그 높이에서 프로토콜이 정한 값이어야 한다", () => {
   const chain = getBlockChain();
-  const expected = difficultyForNext(chain);
   const tip = chain[chain.length - 1];
-
   const cheap = coinbaseBlockOnto(tip, newAddress(), 10);
-  // 난이도만 낮춰 적고 해시는 그대로 두면 해시가 어긋나 걸린다.
-  // 진짜 문제는 낮은 난이도로 *다시 채굴한* 블록이므로 그렇게 만든다.
-  const forged = { ...cheap, difficulty: expected - 1 };
+  assert.notStrictEqual(bitsForNext(chain, cheap.timestamp), Target.POW_LIMIT_BITS);
+
+  // 목표값만 쉽게 적고 해시는 그대로 두면 해시가 어긋나 걸린다.
+  // 진짜 문제는 쉬운 목표값으로 *다시 채굴한* 블록이므로 그렇게 만든다.
+  const forged = { ...cheap, bits: Target.POW_LIMIT_BITS };
   const header = { ...forged, previousHash: tip.hash };
   const found = PoW.findNonce(header, 0, 500000);
   forged.nonce = found.nonce;
@@ -237,27 +238,26 @@ test("난이도는 그 높이에서 프로토콜이 정한 값이어야 한다",
   assert.strictEqual(addBlockToChain(forged), false);
 });
 
-test("작업증명 없이 난이도만 크게 적은 체인은 우리 체인을 넘어서지 못한다", () => {
+test("작업증명 없이 목표값만 어렵게 적은 체인은 우리 체인을 넘어서지 못한다", () => {
   /*
-   * sumDifficulty 는 2^difficulty 의 합이다. difficulty 에 200 을 적으면
-   * 정직한 체인을 단번에 넘어선다. 해시가 그 난이도를 만족하는지 보지
+   * 무게는 2^256/(target+1) 의 합이다. target 을 1 로 적으면(bits 0x01010000)
+   * 정직한 체인을 단번에 넘어선다. 해시가 그 목표값을 만족하는지 보지
    * 않으면 일 한 번 안 하고 체인을 갈아 끼울 수 있었다.
    */
   const data = [createCoinbaseTx(newAddress(), 1, 0)];
   const merkleRoot = getMerkleRoot(data);
   const forged = {
+    version: 1,
     index: 1,
     previousHash: genesis.hash,
     timestamp: now,
     merkleRoot,
     data,
-    difficulty: 200,
+    bits: 0x01010000,
     nonce: 0
   };
-  forged.hash = PoW.createHash(
-    forged.index, forged.previousHash, forged.timestamp,
-    forged.merkleRoot, forged.difficulty, forged.nonce
-  );
+  forged.hash = PoW.createHash(forged);
+  assert.ok(Target.workOf(forged.bits) > Target.workOf(genesis.bits) * 1000000n);
 
   const before = getBlockChain().length;
   assert.strictEqual(replaceChain([genesis, forged]), false);

@@ -113,18 +113,22 @@ const serializeTx = tx => {
 const txIdOf = tx => sha256dHex(serializeTx(tx));
 
 /**
- * 블록 헤더 -> 84바이트.
+ * 블록 헤더 -> 88바이트.
  *
- *   uint32 index | 32바이트 previousHash | uint32 timestamp |
- *   32바이트 merkleRoot | uint32 difficulty | uint64 nonce
+ *   uint32 version | uint32 index | 32바이트 previousHash | uint32 timestamp |
+ *   32바이트 merkleRoot | uint32 bits | uint64 nonce
+ *
+ * version 은 앞으로 규칙을 바꿀 때 채굴자가 찬성을 표시하는 자리다(비트코인의
+ * BIP9). 지금은 1. bits 는 압축 목표값(target.js).
  */
-const serializeHeader = ({ index, previousHash, timestamp, merkleRoot, difficulty, nonce }) =>
+const serializeHeader = ({ version, index, previousHash, timestamp, merkleRoot, bits, nonce }) =>
   Buffer.concat([
+    writeUInt32(version),
     writeUInt32(index),
     writeHash(previousHash),
     writeUInt32(timestamp),
     writeHash(merkleRoot),
-    writeUInt32(difficulty),
+    writeUInt32(bits),
     writeUInt64(nonce)
   ]);
 

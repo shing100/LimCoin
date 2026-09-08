@@ -2,6 +2,11 @@
  * 제네시스 블록을 새로 만든다.
  *
  *   node scripts/generate-genesis.js [--network mainnet|testnet] [--write-wallet] [--force]
+ *   node scripts/generate-genesis.js [--network ...] --rehash
+ *
+ * --rehash 는 기존 제네시스의 코인베이스(프리마인 주소, 금액, 타임스탬프)는
+ * 그대로 두고 헤더만 지금 형식(version, bits)으로 다시 써서 해시를 새로
+ * 만든다. 헤더 형식이 바뀌었을 때 프리마인 니모닉을 바꾸지 않고 쓴다.
  *
  * - 새 니모닉을 만들어 첫 받는 주소로 프리마인(높이 0 보조금)을 받는 제네시스를
  *   src/genesis.json (메인넷) 또는 src/genesis.testnet.json (테스트넷) 에 쓴다.
@@ -35,11 +40,34 @@ const Address = require("../src/address");
 const HD = require("../src/hdwallet");
 const BIP39 = require("../src/bip39");
 
-const GENESIS_DIFFICULTY = 15;
+// 제네시스 목표값 ≈ 2^241 — 평균 2^15 번 해시. 노트북 한 대로 초당 몇 블록.
+const GENESIS_BITS = 0x1f01ffff;
+const GENESIS_VERSION = 1;
 const params = Params.current();
 
 const walletLocation = path.join(__dirname, "..", "src", "wallet.json");
 const genesisLocation = path.join(__dirname, "..", "src", params.genesisFile);
+
+if (flag("--rehash")) {
+  const existing = JSON.parse(fs.readFileSync(genesisLocation, "utf8"));
+  const rehashed = {
+    version: GENESIS_VERSION,
+    index: 0,
+    hash: "",
+    previousHash: ZERO_HASH,
+    timestamp: existing.timestamp,
+    merkleRoot: getMerkleRoot(existing.data),
+    data: existing.data,
+    bits: GENESIS_BITS,
+    nonce: 0
+  };
+  rehashed.hash = blockHashOf(rehashed);
+  fs.writeFileSync(genesisLocation, JSON.stringify(rehashed, null, 2) + "\n");
+  console.log(`${params.name} 제네시스의 헤더를 새 형식으로 다시 썼습니다.`);
+  console.log("  주소   :", existing.data[0].txOuts[0].address, "(그대로)");
+  console.log("  블록해시:", existing.hash, "->", rehashed.hash);
+  process.exit(0);
+}
 
 if (flag("--write-wallet") && fs.existsSync(walletLocation) && !flag("--force")) {
   console.error(
@@ -65,16 +93,17 @@ const genesisTx = {
 genesisTx.id = getTxId(genesisTx);
 
 const genesisBlock = {
+  version: GENESIS_VERSION,
   index: 0,
   hash: "",
   previousHash: ZERO_HASH,
   timestamp: Math.round(new Date().getTime() / 1000),
   merkleRoot: getMerkleRoot([genesisTx]),
   data: [genesisTx],
-  difficulty: GENESIS_DIFFICULTY,
+  bits: GENESIS_BITS,
   nonce: 0
 };
-// 헤더 84바이트의 sha256d — 노드가 쓰는 것과 같은 함수다 (serialization.js)
+// 헤더 88바이트의 sha256d — 노드가 쓰는 것과 같은 함수다 (serialization.js)
 genesisBlock.hash = blockHashOf(genesisBlock);
 
 if (flag("--write-wallet")) {

@@ -1,4 +1,5 @@
 const WebSockets = require('ws'),
+  Target = require("./target"),
   Blockchain = require('./blockchain'),
   Mempool = require("./memPool"),
   ChainIndex = require("./chainIndex"),
@@ -71,7 +72,11 @@ const MAX_HEADER_BUFFER = 200000;
  * 예전에는 갈라진 부분의 헤더 객체를 전부 배열로 들고 있었다. 새 노드가
  * 10만 블록을 받으면 헤더만 40MB 쯤이 쌓였다. 해시만 남기면 그 1/3 이다.
  */
-const HEADER_WINDOW = 32;
+/*
+ * 헤더 검증에 필요한 앞선 블록 수. 목표값(LWMA 창 60 + 그 앞 하나)과
+ * MTP(11)를 덮어야 한다.
+ */
+const HEADER_WINDOW = 64;
 
 /*
  * 우리가 건 피어들. 주소 -> { attempts, timer }
@@ -149,7 +154,8 @@ const blockchainResponse = (data) => {
   return {
     type: BLOCKCHAIN_RESPONSE,
     data,
-    work: chainWork(getBlockChain())
+    // BigInt 는 JSON 에 못 담으므로 10진 문자열로
+    work: chainWork(getBlockChain()).toString()
   }
 }
 
@@ -465,8 +471,8 @@ const handleBlockchainResponse = (ws, receivedBlocks, claimedWork) => {
    * 무게를 알려 주지 않는 상대에게는 예전처럼 높이로 짐작한다.
    */
   const heavier =
-    typeof claimedWork === "number"
-      ? claimedWork > chainWork(getBlockChain())
+    typeof claimedWork === "string" && /^\d{1,80}$/.test(claimedWork)
+      ? BigInt(claimedWork) > chainWork(getBlockChain())
       : latestBlockReceived.index > newestBlock.index;
   if (heavier) {
     requestHeaders(ws);
@@ -513,7 +519,7 @@ const buildLocator = sync => {
 const freshSyncState = () => ({
   phase: null,        // null | "headers" | "blocks"
   window: null,       // 검증에 쓰는 마지막 HEADER_WINDOW 개 (우리 체인 끝 + 받은 헤더)
-  headerWork: 0,      // 갈라진 지점까지의 우리 체인 + 받은 헤더의 누적 무게
+  headerWork: 0n,     // 갈라진 지점까지의 우리 체인 + 받은 헤더의 누적 무게 (BigInt)
   headerHashes: [],   // 받아서 검증한 헤더의 해시 (순서대로)
   forkParent: undefined,
   expected: null,     // 블록 단계에서 받아야 할 블록 해시들 (헤더에서)
@@ -641,7 +647,7 @@ const handleHeadersResponse = (ws, data) => {
     if (sync.window.length > HEADER_WINDOW) {
       sync.window.shift();
     }
-    sync.headerWork += Math.pow(2, header.difficulty);
+    sync.headerWork += Target.workOf(header.bits);
     sync.headerHashes.push(header.hash);
   }
 
@@ -674,7 +680,7 @@ const finishHeaders = ws => {
   sync.expected = new Set(sync.headerHashes);
   sync.window = null;
   sync.headerHashes = [];
-  sync.headerWork = 0;
+  sync.headerWork = 0n;
   sync.inFlight = false;
   requestBlocks(ws);
 };
