@@ -14,7 +14,7 @@ const {
   getBlockSubsidy
 } = require("../src/transactions");
 const { toHexString } = require("../src/utils");
-const { calculateNewDifficulty, replaceChain } = require("../src/blockchain");
+const { calculateNewDifficulty, difficultyForNext, replaceChain } = require("../src/blockchain");
 const genesis = require("../src/genesis.json");
 
 const { ecShim: ec, fakeId } = require("./helpers");
@@ -153,11 +153,16 @@ test("빈 블록은 거부된다", () => {
 
 test("난이도는 너무 빠르면 올라가고 너무 느리면 내려간다", () => {
   // 기대 간격 = BLOCK_GENERATION_INTERVAL(10) * DIFFICULTY_ADJUSMENT_INTERVAL(10) = 100초
+  // 10블록이 걸린 시간은 index-10 블록의 타임스탬프에서 끝 블록까지다.
+  // 그래서 체인은 창 시작 블록 + 10블록 = 11개다.
   const chainWith = (elapsed, difficulty) => {
-    const base = { difficulty, timestamp: 1000 };
-    const chain = new Array(10).fill(base);
-    chain[0] = base;
-    return { newest: { timestamp: 1000 + elapsed }, chain };
+    const chain = [];
+    for (let i = 0; i <= 10; i++) {
+      chain.push({ index: i, difficulty, timestamp: 1000 + Math.round(elapsed * i / 10) });
+    }
+    const newest = chain[10];
+    assert.strictEqual(newest.timestamp, 1000 + elapsed);
+    return { newest, chain };
   };
 
   // 50초 미만 -> 난이도 상승
@@ -172,12 +177,32 @@ test("난이도는 너무 빠르면 올라가고 너무 느리면 내려간다",
   // 수정 전에는 timeExpected/2 비교라 여기서도 난이도가 계속 떨어졌다.
   ({ newest, chain } = chainWith(100, 15));
   assert.strictEqual(calculateNewDifficulty(newest, chain), 15);
+
+  // 창은 정확히 10블록이다. index-10 블록만 빨라도(창 밖) 결과가 바뀌면 안 된다.
+  ({ newest, chain } = chainWith(100, 15));
+  chain.unshift({ index: -1, difficulty: 15, timestamp: 0 });
+  assert.strictEqual(calculateNewDifficulty(newest, chain), 15);
+});
+
+test("메인넷은 블록 사이가 아무리 벌어져도 최소 난이도 블록을 받지 않는다", () => {
+  // 테스트넷의 20배 규칙(test/testnet.test.js)은 메인넷에 없다.
+  // 시간을 앞당겨 적은 채굴자가 난이도를 피할 수 있으므로.
+  const chain = [
+    { index: 0, difficulty: 15, timestamp: 1000 },
+    { index: 1, difficulty: 15, timestamp: 1010 }
+  ];
+  assert.strictEqual(difficultyForNext(chain, 1010 + 201), 15);
+  assert.strictEqual(difficultyForNext(chain, 1010 + 24 * 3600), 15);
+  assert.strictEqual(difficultyForNext(chain), 15);
 });
 
 test("난이도는 1 아래로 내려가지 않는다", () => {
   // difficulty 0 이면 "0".repeat(0) === "" 라 어떤 해시든 통과해 버린다.
-  const chain = new Array(10).fill({ difficulty: 1, timestamp: 1000 });
-  const newest = { timestamp: 1000 + 5000 };
+  const chain = [];
+  for (let i = 0; i <= 10; i++) {
+    chain.push({ index: i, difficulty: 1, timestamp: 1000 + i * 500 });
+  }
+  const newest = chain[10];
   assert.strictEqual(calculateNewDifficulty(newest, chain), 1);
 });
 

@@ -15,10 +15,18 @@ let mempool = [];
  * 때문이다 — 그래야 테스트가 디스크 없이 돈다.
  */
 let listeners = [];
+// 바뀔 때마다 1씩 오른다. "그 사이에 바뀌었나"를 싸게 알 수 있다.
+let version = 0;
+// 돌려주는 함수를 부르면 등록이 풀린다 (채굴처럼 잠깐만 듣는 쪽이 쓴다)
 const onChange = listener => {
   listeners.push(listener);
+  return () => {
+    listeners = listeners.filter(other => other !== listener);
+  };
 };
+const getVersion = () => version;
 const notifyChange = () => {
+  version++;
   for (const listener of listeners) {
     try {
       listener();
@@ -73,12 +81,24 @@ const isTxValidForPool = (tx, pool) => {
  * 다른 곳은 색인을 쓰는데 여기만 빠져 있었다.
  */
 const updateMempool = uTxOutList => {
-  const unspent = indexByOutpoint(uTxOutList);
-
+  /*
+   * 확정된 출력에, 남기기로 한 트랜잭션이 만든 출력을 더해 가며 순서대로 본다.
+   *
+   * 확정된 것만 보면 부모가 아직 mempool 에 있는 자식(이어 쓴 것)은 블록이
+   * 하나 붙을 때마다 — 그 블록과 아무 상관이 없어도 — 조용히 버려졌다.
+   * mempool 은 들어온 순서라 부모가 자식보다 앞에 있으므로 한 번 훑으면 된다.
+   * 부모가 떨어지면 그 출력이 표에 안 올라가 자식도 함께 떨어진다.
+   */
+  const available = indexByOutpoint(uTxOutList);
+  const kept = [];
+  for (const tx of mempool) {
+    if (tx.txIns.every(txIn => available.has(keyOf(txIn.txOutId, txIn.txOutIndex)))) {
+      kept.push(tx);
+      tx.txOuts.forEach((txOut, index) => available.set(keyOf(tx.id, index), txOut));
+    }
+  }
   const before = mempool.length;
-  mempool = mempool.filter(tx =>
-    tx.txIns.every(txIn => unspent.has(keyOf(txIn.txOutId, txIn.txOutIndex)))
-  );
+  mempool = kept;
   if (mempool.length !== before) {
     notifyChange();
   }
@@ -282,6 +302,7 @@ module.exports = {
   getSpendableUTxOuts,
   getMatureUTxOuts,
   onChange,
+  getVersion,
   getMempool,
   updateMempool,
   selectTxsForBlock,

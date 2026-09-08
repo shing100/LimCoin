@@ -19,6 +19,8 @@ const NETWORKS = {
     genesisFile: "./genesis.json",
     magic: "limcoin/main/1",
     defaultDataSubdir: "mainnet",
+    // 시간을 앞당겨 적어 난이도를 피하는 길을 메인넷에는 두지 않는다
+    allowMinDifficultyBlocks: false,
     // 뜰 때 붙어 볼 피어. 아직 없다 — 공개 시드 노드가 생기면 여기 적는다.
     seeds: []
   },
@@ -29,6 +31,8 @@ const NETWORKS = {
     genesisFile: "./genesis.testnet.json",
     magic: "limcoin/test/1",
     defaultDataSubdir: "testnet",
+    // 200초 넘게 블록이 없으면 최소 난이도 블록을 받아 준다 (비트코인 테스트넷의 20분 규칙)
+    allowMinDifficultyBlocks: true,
     seeds: []
   }
 };

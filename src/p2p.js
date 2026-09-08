@@ -310,7 +310,8 @@ const handleMessage = (ws, message) => {
         if(!Array.isArray(message.data)){
           break;
         }
-        // 낱개로 넣으면 트랜잭션마다 UTxOut 집합을 복제하게 된다
+        // 새 트랜잭션 한 건(broadcastTx)일 수도, mempool 전체(REQUEST_MEMPOOL 답)일 수도 있다.
+        // 낱개로 넣으면 트랜잭션마다 UTxOut 집합을 복제하게 되므로 한 번에 넘긴다.
         handleIncomingTxs(message.data);
         break;
       case HELLO:
@@ -810,8 +811,17 @@ const sendMessageToAll = message => [...sockets].forEach(ws => sendMessage(ws, m
 const responseLatest = () => blockchainResponse([getNewestBlock()]);
 // 모두에게 블록 알리기
 const broadcastNewBlock = () => sendMessageToAll(responseLatest());
-// 맴풀 전달하기
+// 맴풀 전달하기 (REQUEST_MEMPOOL 에 답할 때, 그리고 피어가 새로 붙었을 때)
 const broadcastMempool = () => sendMessageToAll(returnMempool());
+/*
+ * 새 트랜잭션 한 건만 알린다.
+ *
+ * 예전에는 트랜잭션이 하나 들어올 때마다 mempool 을 통째로 보냈다. 받는
+ * 쪽은 이미 가진 것까지 다시 검증하고(서명 확인 포함), 피어 수 × mempool
+ * 크기만큼 트래픽이 났다. mempool 이 100건이면 한 건 보내는 데 100건이
+ * 오간 셈이다. 비트코인의 inv/tx 처럼 새 것만 보낸다.
+ */
+const broadcastTx = tx => sendMessageToAll(mempoolResponse([tx]));
 
 // 에러 체크
 const handleSocketError = ws => {
@@ -965,5 +975,6 @@ module.exports = {
   MAX_OUTBOUND,
   NETWORK_MAGIC,
   broadcastNewBlock,
-  broadcastMempool
+  broadcastMempool,
+  broadcastTx
 };

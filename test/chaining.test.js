@@ -292,7 +292,7 @@ test("공통 접두사는 해시가 갈리는 지점까지다", () => {
   assert.strictEqual(countCommonPrefix(ours, [b(0, "g"), b(1, "a")]), 2);
 });
 
-test("replaceChain 은 잘못된 체인을 받아도 예외 없이 false 를 돌려준다", () => {
+test("replaceChain 은 빈 체인, 다른 제네시스, 끊어진 체인을 모두 false 로 돌려준다", () => {
   assert.strictEqual(replaceChain([]), false);
   assert.strictEqual(replaceChain([genesis]), false);
   assert.strictEqual(replaceChain([{ index: 0, hash: "다른 제네시스", data: [] }]), false);
