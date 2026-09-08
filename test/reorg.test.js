@@ -8,7 +8,6 @@
  */
 const test = require("node:test");
 const assert = require("node:assert");
-const elliptic = require("elliptic");
 
 const {
   collectConsumed,
@@ -24,13 +23,13 @@ const { outpointKey } = require("../src/utxo");
 const { toHexString } = require("../src/utils");
 const { COIN } = require("../src/units");
 
-const ec = new elliptic.ec("secp256k1");
-const { newAddress } = require("./helpers");
+const { ecShim: ec } = require("./helpers");
+const { newAddress, fakeId } = require("./helpers");
 
 /* ------------------------------------------- undo 데이터 자체 */
 
 const seed = (id, address, amount) => ({
-  txOutId: id,
+  txOutId: fakeId(id),
   txOutIndex: 0,
   address,
   amount
@@ -46,7 +45,7 @@ test("되감기는 블록을 적용하기 전 상태를 그대로 되돌린다",
   const before = [seed("s1", aliceAddress, 10 * COIN), seed("s2", aliceAddress, 5 * COIN)];
 
   const tx = {
-    txIns: [{ txOutId: "s1", txOutIndex: 0, signature: "" }],
+    txIns: [{ txOutId: fakeId("s1"), txOutIndex: 0, signature: "" }],
     txOuts: [{ address: bob, amount: 10 * COIN }]
   };
   tx.id = getTxId(tx);
@@ -55,8 +54,8 @@ test("되감기는 블록을 적용하기 전 상태를 그대로 되돌린다",
   const consumed = collectConsumed([tx], before);
   const after = updateUTxOuts([tx], before);
 
-  assert.deepStrictEqual(sortedKeys(consumed), ["s1:0"]);
-  assert.deepStrictEqual(sortedKeys(after), [`${tx.id}:0`, "s2:0"].sort());
+  assert.deepStrictEqual(sortedKeys(consumed), [`${fakeId("s1")}:0`]);
+  assert.deepStrictEqual(sortedKeys(after), [`${tx.id}:0`, `${fakeId("s2")}:0`].sort());
   assert.deepStrictEqual(
     sortedKeys(rollbackTxs([tx], after, consumed)),
     sortedKeys(before)
@@ -71,7 +70,7 @@ test("한 블록 안에서 만들어졌다 쓰인 출력은 되감아도 되살�
   const before = [seed("s1", aliceAddress, 10 * COIN)];
 
   // t1: alice -> alice, t2: t1 의 출력을 바로 써서 bob 에게
-  const t1 = { txIns: [{ txOutId: "s1", txOutIndex: 0, signature: "" }], txOuts: [{ address: aliceAddress, amount: 10 * COIN }] };
+  const t1 = { txIns: [{ txOutId: fakeId("s1"), txOutIndex: 0, signature: "" }], txOuts: [{ address: aliceAddress, amount: 10 * COIN }] };
   t1.id = getTxId(t1);
   t1.txIns[0].signature = toHexString(alice.sign(t1.id).toDER());
 
@@ -84,7 +83,7 @@ test("한 블록 안에서 만들어졌다 쓰인 출력은 되감아도 되살�
   const after = updateUTxOuts(txs, before);
 
   // t1 의 출력은 블록 적용 *전* 집합에 없으므로 undo 에도 담기지 않는다
-  assert.deepStrictEqual(sortedKeys(consumed), ["s1:0"]);
+  assert.deepStrictEqual(sortedKeys(consumed), [`${fakeId("s1")}:0`]);
   assert.deepStrictEqual(sortedKeys(after), [`${t2.id}:0`]);
   assert.deepStrictEqual(
     sortedKeys(rollbackTxs(txs, after, consumed)),

@@ -87,6 +87,9 @@ const openSocket = () => ({
   sent: [],
   send(text) {
     this.sent.push(JSON.parse(text));
+  },
+  close() {
+    this.readyState = 3;
   }
 });
 
@@ -94,22 +97,22 @@ test("HELLO 로 알려 준 주소를 기억하고, 우리 자신의 주소는 �
   P2P.setPublicUrl("ws://me.example:3000");
 
   const ws = openSocket();
-  P2P.handleMessage(ws, { type: "HELLO", data: { url: "ws://peer-a.example:3000" } });
+  P2P.handleMessage(ws, { type: "HELLO", data: { network: P2P.NETWORK_MAGIC, url: "ws://peer-a.example:3000" } });
   assert.strictEqual(ws.advertisedUrl, "ws://peer-a.example:3000");
   assert.ok(P2P.getKnownAddresses().includes("ws://peer-a.example:3000"));
 
-  P2P.handleMessage(openSocket(), { type: "HELLO", data: { url: "ws://me.example:3000" } });
+  P2P.handleMessage(openSocket(), { type: "HELLO", data: { network: P2P.NETWORK_MAGIC, url: "ws://me.example:3000" } });
   assert.ok(!P2P.getKnownAddresses().includes("ws://me.example:3000"), "자기 자신은 배우지 않는다");
 
   // 모양이 이상한 것은 무시한다
-  for (const data of [null, 1, {}, { url: 5 }, { url: "http://not-ws" }, { url: "ws://" }]) {
+  for (const data of [null, 1, {}, { url: 5 }, { network: P2P.NETWORK_MAGIC, url: 5 }, { network: P2P.NETWORK_MAGIC, url: "http://not-ws" }, { network: P2P.NETWORK_MAGIC, url: "ws://" }]) {
     assert.doesNotThrow(() => P2P.handleMessage(openSocket(), { type: "HELLO", data }));
   }
 });
 
 test("GET_PEERS 에 아는 주소를 주되, 묻는 쪽 자기 주소는 뺀다", () => {
   const asker = openSocket();
-  P2P.handleMessage(asker, { type: "HELLO", data: { url: "ws://asker.example:3000" } });
+  P2P.handleMessage(asker, { type: "HELLO", data: { network: P2P.NETWORK_MAGIC, url: "ws://asker.example:3000" } });
   P2P.handleMessage(asker, { type: "GET_PEERS" });
 
   const reply = asker.sent[asker.sent.length - 1];
@@ -144,4 +147,13 @@ test("망가진 PEERS_RESPONSE / GET_PEERS 에도 죽지 않는다", () => {
   for (const url of P2P.getDialedPeers()) {
     P2P.disconnectPeer(url);
   }
+});
+
+test("다른 망의 피어는 HELLO 를 보고 끊는다", () => {
+  const ws = openSocket();
+  let closed = false;
+  ws.close = () => { closed = true; };
+  P2P.handleMessage(ws, { type: "HELLO", data: { network: "limcoin/other/1", url: "ws://other.example:3000" } });
+  assert.strictEqual(closed, true, "테스트넷과 메인넷이 섞이면 안 된다");
+  assert.ok(!P2P.getKnownAddresses().includes("ws://other.example:3000"), "다른 망의 주소는 배우지 않는다");
 });

@@ -4,7 +4,6 @@
  */
 const test = require("node:test");
 const assert = require("node:assert");
-const elliptic = require("elliptic");
 
 const {
   getTxId,
@@ -18,7 +17,7 @@ const { toHexString } = require("../src/utils");
 const { calculateNewDifficulty, replaceChain } = require("../src/blockchain");
 const genesis = require("../src/genesis.json");
 
-const ec = new elliptic.ec("secp256k1");
+const { ecShim: ec, fakeId } = require("./helpers");
 
 const makeWallet = () => {
   const keyPair = ec.genKeyPair();
@@ -33,8 +32,8 @@ const makeWallet = () => {
 const signWith = (keyPair, txId) => toHexString(keyPair.sign(txId).toDER());
 
 test("getTxId 는 내용이 같으면 같은 id 를, 다르면 다른 id 를 만든다", () => {
-  const a = { txIns: [{ txOutId: "x", txOutIndex: 0 }], txOuts: [{ address: "04ab", amount: 1 }] };
-  const b = { txIns: [{ txOutId: "x", txOutIndex: 0 }], txOuts: [{ address: "04ab", amount: 2 }] };
+  const a = { txIns: [{ txOutId: "a".repeat(64), txOutIndex: 0 }], txOuts: [{ address: "04ab", amount: 1 }] };
+  const b = { txIns: [{ txOutId: "a".repeat(64), txOutIndex: 0 }], txOuts: [{ address: "04ab", amount: 2 }] };
   assert.strictEqual(getTxId(a), getTxId(a));
   assert.notStrictEqual(getTxId(a), getTxId(b));
 });
@@ -45,11 +44,11 @@ test("남의 UTxOut 을 자기 키로 서명한 tx 는 거부된다", () => {
   const attacker = makeWallet();
 
   const uTxOuts = [
-    { txOutId: "seed", txOutIndex: 0, address: victim.address, amount: 10 }
+    { txOutId: fakeId("seed"), txOutIndex: 0, address: victim.address, amount: 10 }
   ];
 
   const tx = {
-    txIns: [{ txOutId: "seed", txOutIndex: 0, signature: "" }],
+    txIns: [{ txOutId: fakeId("seed"), txOutIndex: 0, signature: "" }],
     txOuts: [{ address: attacker.address, amount: 10 }]
   };
   tx.id = getTxId(tx);
@@ -63,11 +62,11 @@ test("올바르게 서명한 tx 는 통과한다", () => {
   const receiver = makeWallet();
 
   const uTxOuts = [
-    { txOutId: "seed", txOutIndex: 0, address: owner.address, amount: 10 }
+    { txOutId: fakeId("seed"), txOutIndex: 0, address: owner.address, amount: 10 }
   ];
 
   const tx = {
-    txIns: [{ txOutId: "seed", txOutIndex: 0, signature: "" }],
+    txIns: [{ txOutId: fakeId("seed"), txOutIndex: 0, signature: "" }],
     txOuts: [{ address: receiver.address, amount: 10 }]
   };
   tx.id = getTxId(tx);
@@ -79,10 +78,10 @@ test("올바르게 서명한 tx 는 통과한다", () => {
 test("서명이 깨진 tx 는 예외 대신 false 를 돌려준다", () => {
   const owner = makeWallet();
   const uTxOuts = [
-    { txOutId: "seed", txOutIndex: 0, address: owner.address, amount: 10 }
+    { txOutId: fakeId("seed"), txOutIndex: 0, address: owner.address, amount: 10 }
   ];
   const tx = {
-    txIns: [{ txOutId: "seed", txOutIndex: 0, signature: "not-a-signature" }],
+    txIns: [{ txOutId: fakeId("seed"), txOutIndex: 0, signature: "not-a-signature" }],
     txOuts: [{ address: owner.address, amount: 10 }]
   };
   tx.id = getTxId(tx);
@@ -93,10 +92,10 @@ test("서명이 깨진 tx 는 예외 대신 false 를 돌려준다", () => {
 test("입력보다 많이 쓰는 tx 는 거부된다", () => {
   const owner = makeWallet();
   const uTxOuts = [
-    { txOutId: "seed", txOutIndex: 0, address: owner.address, amount: 10 }
+    { txOutId: fakeId("seed"), txOutIndex: 0, address: owner.address, amount: 10 }
   ];
   const tx = {
-    txIns: [{ txOutId: "seed", txOutIndex: 0, signature: "" }],
+    txIns: [{ txOutId: fakeId("seed"), txOutIndex: 0, signature: "" }],
     txOuts: [{ address: owner.address, amount: 999 }] // 무에서 창조
   };
   tx.id = getTxId(tx);
@@ -112,13 +111,13 @@ test("블록에 위조 tx 가 하나라도 섞이면 블록 전체가 거부된�
   const attacker = makeWallet();
 
   const uTxOuts = [
-    { txOutId: "seed", txOutIndex: 0, address: victim.address, amount: 10 }
+    { txOutId: fakeId("seed"), txOutIndex: 0, address: victim.address, amount: 10 }
   ];
 
   const coinbaseTx = createCoinbaseTx(miner.address, 1);
 
   const forged = {
-    txIns: [{ txOutId: "seed", txOutIndex: 0, signature: "" }],
+    txIns: [{ txOutId: fakeId("seed"), txOutIndex: 0, signature: "" }],
     txOuts: [{ address: attacker.address, amount: 10 }]
   };
   forged.id = getTxId(forged);
@@ -205,7 +204,7 @@ test("제네시스 파일에 개인키가 들어 있지 않다", () => {
   const raw = JSON.stringify(genesis);
   assert.ok(!raw.includes("privateKey"));
   assert.strictEqual(genesis.index, 0);
-  assert.strictEqual(genesis.previousHash, "");
+  assert.strictEqual(genesis.previousHash, "0".repeat(64), "제네시스 앞에는 아무것도 없다: 0 32바이트");
   assert.strictEqual(isAddressValid(genesis.data[0].txOuts[0].address), true);
   assert.strictEqual(getTxId(genesis.data[0]), genesis.data[0].id);
 });

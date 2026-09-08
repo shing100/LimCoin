@@ -1,12 +1,11 @@
-const CryptoJS = require("crypto-js"),
-  elliptic = require("elliptic"),
-  _ = require("lodash"),
-  utils = require("./utils");
+const _ = require("lodash");
 
+const Keys = require("./keys");
+const Address = require("./address");
+const Params = require("./params");
+const { txIdOf } = require("./serialization");
 const { COIN } = require("./units");
 const { keyOf, outpointKey, indexByOutpoint } = require("./utxo");
-
-const ec = new elliptic.ec("secp256k1");
 
 /*
  * 발행 정책. 백서 6장 "Incentive":
@@ -129,17 +128,12 @@ const isSpendable = (uTxOut, spendHeight) => {
 };
 
 // tx id 가져오기
-const getTxId = tx => {
-  const txInContent = tx.txIns
-    .map(txIn => txIn.txOutId + txIn.txOutIndex)
-    .reduce((a, b) => a + b, "");
-
-  const txOutContent = tx.txOuts
-    .map(txOut => txOut.address + txOut.amount)
-    .reduce((a, b) => a + b, "");
-
-  return CryptoJS.SHA256(txInContent + txOutContent).toString();
-};
+/*
+ * txid = sha256d(정규 직렬화). 서명과 공개키는 들어가지 않는다 —
+ * "무엇을 어디로 보내는가"만 덮으므로 서명 바이트가 바뀌어도 id 는 같다.
+ * 바이트 형식은 serialization.js 에 있다.
+ */
+const getTxId = tx => txIdOf(tx);
 
 // genesisTx id 값을 알아내기 위한 로그
 //console.log(getTxId(genesisTx));
@@ -166,22 +160,20 @@ const signTxIn = (tx, txInIndex, privateKey, uTxOutList) => {
   if (referencedUTxOut === null || referencedUTxOut === undefined) {
     throw Error("Couldn't find the referenced uTxOut, not signing");
   }
-  const referencedAddress = referencedUTxOut.address;
-  if (getPublicKey(privateKey) !== referencedAddress) {
+  const publicKey = getPublicKey(privateKey);
+  if (!Address.addressMatchesPublicKey(referencedUTxOut.address, publicKey, addressVersion())) {
     return false;
   }
-  const key = ec.keyFromPrivate(privateKey, "hex");
-  const signature = utils.toHexString(key.sign(dataToSign).toDER());
-  return signature;
+  // 주소가 공개키의 해시라 검증하는 쪽이 공개키를 알 길이 없다. 입력에 실어 준다.
+  txIn.publicKey = publicKey;
+  return Keys.sign(privateKey, dataToSign);
 };
 
 // 공개키 얻어오기
-const getPublicKey = privateKey => {
-  return ec
-    .keyFromPrivate(privateKey, "hex")
-    .getPublic()
-    .encode("hex");
-};
+const getPublicKey = privateKey => Keys.getPublicKey(privateKey);
+
+// 이 노드가 속한 망의 주소 버전 바이트
+const addressVersion = () => Params.current().addressVersion;
 
 const updateUTxOuts = (newTxs, uTxOutList, blockIndex = null) => {
   const newUTxOuts = newTxs
@@ -234,25 +226,28 @@ const isTxInStructureValid = txIn => {
   } else if (typeof txIn.txOutIndex !== "number") {
     console.log("The txIn doesn't have a valid txOutIndex");
     return false;
+  } else if (txIn.publicKey !== undefined && typeof txIn.publicKey !== "string") {
+    console.log("The txIn's publicKey is not a string");
+    return false;
   } else {
     return true;
   }
 };
 
 // 주소 유효성 검사
+/*
+ * 이 망에서 받을 수 있는 주소인가.
+ *
+ * Base58Check 주소(체크섬과 망 버전 바이트가 맞아야 한다) 또는 예전 형식
+ * (비압축 공개키 hex 130자). 다른 망의 주소는 여기서 걸린다 — 테스트넷
+ * 주소로 메인넷 코인을 보낼 수 없다.
+ */
 const isAddressValid = address => {
-  if (address.length !== 130) {
-    console.log("The address length is not the expected one");
+  if (!Address.isAddressValid(address, addressVersion())) {
+    console.log("The address is not valid for this network");
     return false;
-  } else if (address.match("^[a-fA-F0-9]+$") === null) {
-    console.log("The address doesn't match the hex patter");
-    return false;
-  } else if (!address.startsWith("04")) {
-    console.log("The address doesn't start with 04");
-    return false;
-  } else {
-    return true;
   }
+  return true;
 };
 
 // 금액은 최소 단위(lm) 기준 정수여야 한다.
@@ -319,14 +314,24 @@ const validateTxIn = (txIn, tx, uTxOuts, spendHeight) => {
     );
     return false;
   } else {
+    /*
+     * 누구의 서명이어야 하는가.
+     *
+     * 예전 형식 주소는 그 자체가 공개키다. 새 주소는 공개키의 해시이므로
+     * 입력에 실린 공개키가 그 주소의 것인지 먼저 보고, 그 공개키로 서명을
+     * 확인한다. 둘 중 하나라도 어긋나면 남의 코인이다.
+     */
     const address = wantedTxOut.address;
-    try {
-      const key = ec.keyFromPublic(address, "hex");
-      return key.verify(tx.id, txIn.signature) === true;
-    } catch (e) {
-      console.log(`Couldn't verify the signature of a txIn: ${e.message}`);
+    const publicKey = Address.isLegacyAddress(address) ? address : txIn.publicKey;
+    if (!Address.addressMatchesPublicKey(address, publicKey, addressVersion())) {
+      console.log("The txIn's public key does not belong to the referenced address");
       return false;
     }
+    if (!Keys.verify(publicKey, tx.id, txIn.signature)) {
+      console.log("The txIn's signature is invalid");
+      return false;
+    }
+    return true;
   }
 };
 
@@ -605,6 +610,7 @@ module.exports = {
   collectConsumed,
   rollbackTxs,
   getPublicKey,
+  addressVersion,
   isAddressValid,
   getBlockSubsidy,
   getTotalSupply,

@@ -8,7 +8,6 @@
  */
 const test = require("node:test");
 const assert = require("node:assert");
-const elliptic = require("elliptic");
 
 const {
   createCoinbaseTx, processTxs, updateUTxOuts, getTxId,
@@ -19,7 +18,7 @@ const { toHexString } = require("../src/utils");
 const { COIN } = require("../src/units");
 const { outpointKey } = require("../src/utxo");
 
-const ec = new elliptic.ec("secp256k1");
+const { ecShim: ec, fakeId } = require("./helpers");
 const makeWallet = () => {
   const keyPair = ec.genKeyPair();
   return { keyPair, address: keyPair.getPublic().encode("hex") };
@@ -56,7 +55,7 @@ test("코인베이스가 만든 출력에는 생성 높이와 표시가 붙는�
 test("일반 트랜잭션이 만든 출력에는 코인베이스 표시가 붙지 않는다", () => {
   const alice = makeWallet();
   const bob = makeWallet();
-  const seed = { txOutId: "seed", txOutIndex: 0, address: alice.address, amount: 10 * COIN };
+  const seed = { txOutId: fakeId("seed"), txOutIndex: 0, address: alice.address, amount: 10 * COIN };
   const tx = spendOutput(alice, bob.address, seed, 10 * COIN);
 
   const after = updateUTxOuts([tx], [seed], 3);

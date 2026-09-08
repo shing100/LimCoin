@@ -85,7 +85,8 @@ class Block{
 // 제네시스 블록은 genesis.json 에서 읽는다.
 // 새 체인을 띄우려면 `node scripts/generate-genesis.js` 로 다시 만들 것.
 // (하드코딩 시절 쓰던 주소는 개인키가 저장소에 함께 커밋되어 폐기되었다)
-const genesisData = require("./genesis.json");
+const Params = require("./params");
+const genesisData = require(Params.current().genesisFile);
 
 const genesisBlock = new Block(
   genesisData.index,
@@ -124,6 +125,27 @@ const getTimestamp = () => Math.round(new Date().getTime() / 1000);
 // 블록체인 전체 가져오기
 const getBlockChain = () => blockchain;
 
+/*
+ * 채굴 보상을 받을 주소.
+ *
+ * LIMCOIN_MINING_ADDRESS 가 있으면 그 주소로 — 노드 지갑이 아닌, 이 기계에
+ * 키가 없는 주소(콜드 지갑)로 받을 수 있다. 채굴 노드가 뚫려도 보상은 안전하다.
+ * 지갑이 꺼져 있으면 이 값이 없이는 채굴할 수 없다.
+ */
+const miningAddress = () => {
+  const configured = process.env.LIMCOIN_MINING_ADDRESS;
+  if (configured) {
+    if (!Transactions.isAddressValid(configured)) {
+      throw Error(`LIMCOIN_MINING_ADDRESS 가 이 망의 주소가 아닙니다: ${configured}`);
+    }
+    return configured;
+  }
+  if (!Wallet.isEnabled()) {
+    throw Error("지갑이 꺼져 있습니다. 채굴하려면 LIMCOIN_MINING_ADDRESS 를 주세요.");
+  }
+  return getPublicFromWallet();
+};
+
 // 코인 기반 새로운 블록 생성하기
 const createNewBlock = async () => {
   const nextIndex = getNewestBlock().index + 1;
@@ -146,7 +168,7 @@ const createNewBlock = async () => {
   const totalFees = sumBlockFees(selected, snapshot);
 
   // 채굴자는 보조금에 더해 담은 트랜잭션들의 수수료를 가져간다 (백서 6장)
-  const coinbaseTx = createCoinbaseTx(getPublicFromWallet(), nextIndex, totalFees);
+  const coinbaseTx = createCoinbaseTx(miningAddress(), nextIndex, totalFees);
 
   return await createNewRawBlock([coinbaseTx, ...selected]);
 };
@@ -959,6 +981,32 @@ const sendTx = (address, amount, fee = 0) => {
   return tx;
 };
 
+/*
+ * 밖에서 만들어 서명한 트랜잭션을 받는다 (거래소, 하드웨어 지갑, 다른 언어 지갑).
+ *
+ * 이 노드의 지갑과는 무관하다. 검증은 피어가 보낸 트랜잭션과 똑같이 한다 —
+ * id 가 내용과 맞는지, 입력이 있는지, 서명이 맞는지, 성숙했는지. 통과하면
+ * mempool 에 넣고 피어에게 알린다. 실패하면 이유를 던진다(피어 것은 조용히
+ * 버리지만 직접 보낸 사람에게는 왜 안 되는지 말해 줘야 한다).
+ */
+const submitTx = tx => {
+  if (tx === null || typeof tx !== "object" || !Array.isArray(tx.txIns) || !Array.isArray(tx.txOuts)) {
+    throw Error("트랜잭션 모양이 아닙니다 ({ id, txIns, txOuts })");
+  }
+  let expectedId;
+  try {
+    expectedId = Transactions.getTxId(tx);
+  } catch (e) {
+    throw Error(`직렬화할 수 없습니다: ${e.message}`);
+  }
+  if (tx.id !== expectedId) {
+    throw Error(`id 가 내용과 맞지 않습니다 (계산값 ${expectedId})`);
+  }
+  addToMempool(tx, getUTxOutList(), nextHeight());
+  require("./p2p").broadcastMempool();
+  return { id: tx.id, pending: true };
+};
+
 // mempool 과 코인베이스 성숙도까지 반영해 지금 실제로 보낼 수 있는 금액
 const getSpendableBalance = () =>
   getWalletBalance(getMatureUTxOuts(getSpendableUTxOuts(uTxOuts), nextHeight()));
@@ -1016,5 +1064,7 @@ module.exports = {
   nextHeight,
   sendTx,
   handleIncomingTxs,
-  getUTxOutList
+  getUTxOutList,
+  miningAddress,
+  submitTx
 };

@@ -1,0 +1,47 @@
+# 테스트넷 3노드 예시.
+#
+#   docker compose up --build
+#
+# seed 만 공개 주소를 알고, 나머지 둘은 seed 만 알고 뜬다. 피어 발견으로
+# 서로를 배워 그물이 이어진다. seed 가 자동 채굴한다.
+#
+#   curl localhost:3001/info        # seed
+#   curl localhost:3002/peers       # node-a 가 아는 피어 (seed 와 node-b 둘)
+services:
+  seed:
+    build: .
+    environment:
+      LIMCOIN_NETWORK: testnet
+      LIMCOIN_PUBLIC_URL: ws://seed:3000
+      LIMCOIN_MINE: "1"
+      LIMCOIN_WALLET_TOKEN: ${LIMCOIN_WALLET_TOKEN:-change-me}
+    ports: ["3001:3000"]
+    volumes: ["seed-data:/data"]
+
+  node-a:
+    build: .
+    environment:
+      LIMCOIN_NETWORK: testnet
+      LIMCOIN_PUBLIC_URL: ws://node-a:3000
+      LIMCOIN_PEERS: ws://seed:3000
+      LIMCOIN_WALLET_TOKEN: ${LIMCOIN_WALLET_TOKEN:-change-me}
+    ports: ["3002:3000"]
+    volumes: ["node-a-data:/data"]
+    depends_on: [seed]
+
+  # 지갑 없는 노드 — 거래소가 돌리는 모양. 키는 이 컨테이너에 없다.
+  node-b:
+    build: .
+    environment:
+      LIMCOIN_NETWORK: testnet
+      LIMCOIN_PUBLIC_URL: ws://node-b:3000
+      LIMCOIN_PEERS: ws://seed:3000
+      LIMCOIN_WALLET: "off"
+    ports: ["3003:3000"]
+    volumes: ["node-b-data:/data"]
+    depends_on: [seed]
+
+volumes:
+  seed-data:
+  node-a-data:
+  node-b-data:

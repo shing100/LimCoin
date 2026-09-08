@@ -2,6 +2,7 @@
  * 노드 운영 기능 테스트 — 영속성, 인덱싱, 재구성 시 트랜잭션 복구.
  */
 const test = require("node:test");
+const { fakeId } = require("./helpers");
 const assert = require("node:assert");
 const fs = require("fs");
 const os = require("os");
@@ -143,15 +144,14 @@ test("주소 색인은 같은 주소의 UTxOut 을 합산한다", () => {
 });
 
 test("validateTx 는 색인을 넘겨도 넘기지 않아도 같은 답을 낸다", () => {
-  const elliptic = require("elliptic");
-  const { toHexString } = require("../src/utils");
-  const ec = new elliptic.ec("secp256k1");
+    const { toHexString } = require("../src/utils");
+  const { ecShim: ec } = require("./helpers");
   const owner = ec.genKeyPair();
   const address = owner.getPublic().encode("hex");
 
-  const uTxOuts = [{ txOutId: "seed", txOutIndex: 0, address, amount: 10 * COIN }];
+  const uTxOuts = [{ txOutId: fakeId("seed"), txOutIndex: 0, address, amount: 10 * COIN }];
   const tx = {
-    txIns: [{ txOutId: "seed", txOutIndex: 0, signature: "" }],
+    txIns: [{ txOutId: fakeId("seed"), txOutIndex: 0, signature: "" }],
     txOuts: [{ address, amount: 9 * COIN }]
   };
   tx.id = getTxId(tx);

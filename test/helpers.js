@@ -4,13 +4,48 @@
  * 제네시스 난이도(15)면 nonce 를 수만 번 돌리면 되므로 테스트 안에서
  * 몇백 ms 에 끝난다.
  */
-const elliptic = require("elliptic");
+const Keys = require("../src/keys");
 const { createCoinbaseTx } = require("../src/transactions");
 const { getMerkleRoot } = require("../src/merkle");
 const PoW = require("../src/pow");
 
-const ec = new elliptic.ec("secp256k1");
-const newAddress = () => ec.genKeyPair().getPublic().encode("hex");
+/*
+ * elliptic 시절 테스트가 쓰던 keyPair 모양을 Node crypto 위에 흉내 낸다.
+ *
+ *   keyPair.sign(txId).toDER()        -> 서명 바이트 (low-S DER)
+ *   keyPair.getPublic().encode("hex") -> 비압축 공개키 hex
+ *
+ * 테스트 파일 여덟 개가 이 모양에 기대고 있어, 형식을 바꾸는 대신 맞춰 준다.
+ * 새 테스트는 Keys 를 바로 쓰면 된다.
+ */
+const keyPairFrom = privateKey => {
+  const publicKey = Keys.getPublicKey(privateKey);
+  return {
+    privateKey,
+    publicKey,
+    sign: txId => ({ toDER: () => Buffer.from(Keys.sign(privateKey, txId), "hex") }),
+    getPublic: () => ({ encode: () => publicKey }),
+    getPrivate: () => ({ toString: () => privateKey })
+  };
+};
+
+const ecShim = {
+  genKeyPair: () => keyPairFrom(Keys.generatePrivateKey()),
+  keyFromPrivate: privateKey => keyPairFrom(privateKey)
+};
+
+// 예전 형식 주소(공개키 hex). 테스트는 두 형식 다 다뤄야 하므로 둘 다 둔다.
+const newAddress = () => ecShim.genKeyPair().publicKey;
+
+/*
+ * 테스트용 가짜 트랜잭션 id. txOutId 는 직렬화에서 32바이트여야 하므로
+ * "seed" 같은 이름을 그대로 쓸 수 없다. 이름을 sha256 해서 64자로 만든다.
+ * 이미 64자 hex 면 그대로 둔다 — 진짜 id 와 섞어 써도 된다.
+ */
+const fakeId = label =>
+  /^[0-9a-f]{64}$/i.test(label)
+    ? label
+    : require("crypto").createHash("sha256").update(String(label)).digest("hex");
 
 const now = () => Math.round(Date.now() / 1000);
 
@@ -77,4 +112,4 @@ const mineChainOnto = (previousBlock, n, offset = 0, base) => {
   return blocks;
 };
 
-module.exports = { newAddress, mineOnto, coinbaseBlockOnto, mineChainOnto };
+module.exports = { ecShim, keyPairFrom, fakeId, newAddress, mineOnto, coinbaseBlockOnto, mineChainOnto };
