@@ -147,7 +147,32 @@ const miningAddress = () => {
 };
 
 // 코인 기반 새로운 블록 생성하기
+/*
+ * 채굴하는 동안 새 트랜잭션이 들어오면 템플릿을 다시 만든다.
+ *
+ * 예전에는 블록 하나를 다 찾을 때까지 처음 담은 트랜잭션만 돌렸다. 그래서
+ * 트랜잭션은 "지금 파는 블록"에는 못 들어가고 그 다음 블록을 기다렸다 —
+ * 확인까지 평균 1.5블록이 걸렸다. 작업증명은 해시 한 번 한 번이 독립이라
+ * (기억이 없다) 도중에 템플릿을 갈아도 지금까지 한 일을 잃는 게 아니다.
+ * 그래서 새 트랜잭션이 오면 바로 갈아 끼운다. 블록이 이미 꽉 찼으면
+ * 갈 일이 없다.
+ */
+const TEMPLATE_STALE = "TEMPLATE_STALE";
+
 const createNewBlock = async () => {
+  for (;;) {
+    try {
+      return await mineTemplate();
+    } catch (e) {
+      if (e.code !== TEMPLATE_STALE) {
+        throw e;
+      }
+      // 새 트랜잭션을 담아 다시 판다
+    }
+  }
+};
+
+const mineTemplate = async () => {
   const nextIndex = getNewestBlock().index + 1;
   // 모듈 스코프의 uTxOuts 를 가리지 않게 이름을 달리한다
   const snapshot = getUTxOutList();
@@ -170,11 +195,12 @@ const createNewBlock = async () => {
   // 채굴자는 보조금에 더해 담은 트랜잭션들의 수수료를 가져간다 (백서 6장)
   const coinbaseTx = createCoinbaseTx(miningAddress(), nextIndex, totalFees);
 
-  return await createNewRawBlock([coinbaseTx, ...selected]);
+  const full = selected.length >= MAX_TXS_PER_BLOCK - 1;
+  return await createNewRawBlock([coinbaseTx, ...selected], { restartOnNewTx: !full });
 };
 
 // 새 블록 추가하기
-const createNewRawBlock = async data => {
+const createNewRawBlock = async (data, { restartOnNewTx = false } = {}) => {
   const previousBlock = getNewestBlock();
   const newBlockIndex = previousBlock.index + 1;
   /*
@@ -183,7 +209,7 @@ const createNewRawBlock = async data => {
    * (비트코인 코어의 GetMinimumTime 과 같은 처리다)
    */
   const newTimestamp = Math.max(getTimestamp(), medianTimePast(blockchain) + 1);
-  const difficulty = findDifficulty();
+  const difficulty = difficultyForNext(blockchain, newTimestamp);
   const mining = findBlockInWorkers(
     newBlockIndex,
     previousBlock.hash,
@@ -194,26 +220,30 @@ const createNewRawBlock = async data => {
 
   /*
    * 다른 노드가 먼저 블록을 올리면 헛돌지 않고 멈춘다.
-   *
-   * 워커에 중단을 알리는 것만으로는 promise 가 풀리지 않으므로
-   * (워커는 아무 답도 보내지 않는다) 여기서 직접 거절한다.
+   * cancel() 이 채굴 promise 를 거절로 끝내므로 await 가 바로 풀린다.
    */
-  let staleReject;
-  const stale = new Promise((resolve, reject) => { staleReject = reject; });
   const cancelIfStale = setInterval(() => {
     if (getNewestBlock().hash !== previousBlock.hash) {
-      mining.cancel();
-      staleReject(Error("채굴하는 동안 다른 블록이 먼저 들어왔습니다. 다시 시도하세요."));
+      mining.cancel("채굴하는 동안 다른 블록이 먼저 들어왔습니다. 다시 시도하세요.");
     }
   }, 500);
-  // 아무도 안 받으면 unhandled rejection 으로 잡히므로 미리 삼켜 둔다
-  stale.catch(() => {});
+
+  // mempool 이 바뀌면(새 트랜잭션, 또는 남의 블록이 붙어 빠진 것) 템플릿을 새로 만든다
+  let stopListening = () => {};
+  if (restartOnNewTx) {
+    stopListening = Mempool.onChange(() => {
+      const stale = Error("채굴하는 동안 mempool 이 바뀌어 템플릿을 다시 만듭니다");
+      stale.code = TEMPLATE_STALE;
+      mining.cancel(stale);
+    });
+  }
 
   let newBlock;
   try {
-    newBlock = await Promise.race([mining, stale]);
+    newBlock = await mining;
   } finally {
     clearInterval(cancelIfStale);
+    stopListening();
   }
 
   // 취소가 늦었을 수도 있으니 한 번 더 본다
@@ -235,28 +265,78 @@ const createNewRawBlock = async data => {
  * 후보 체인의 블록은 난이도를 스스로 정해도 아무도 따지지 않았다.
  * 검증하는 쪽은 그 체인의 앞부분을 기준으로 계산해야 한다.
  */
-const difficultyForNext = chain => {
+const difficultyForNext = (chain, newTimestamp) => {
   const newestBlock = chain[chain.length - 1];
+
+  /*
+   * 테스트넷의 "20분 규칙" (비트코인 fPowAllowMinDifficultyBlocks).
+   *
+   * 큰 채굴자가 난이도를 올려 놓고 떠나면 남은 노트북은 블록 하나에 몇
+   * 시간이 걸리고, 난이도는 10블록마다 1씩만 내려가니 체인이 사실상 멎는다.
+   * 테스트넷은 값어치가 없으므로, 직전 블록 뒤로 목표 주기의 20배(200초)가
+   * 지났으면 그 블록은 최소 난이도로 만들어도 받아 준다. 그 다음 블록은
+   * 다시 원래 난이도로 돌아간다(특별 블록의 난이도를 이어받지 않는다).
+   * 메인넷에는 없다 — 시간을 앞당겨 적은 채굴자가 난이도를 피할 수 있으므로.
+   */
+  const params = Params.current();
+  if (
+    params.allowMinDifficultyBlocks &&
+    typeof newTimestamp === "number" &&
+    newTimestamp > newestBlock.timestamp + BlOCK_GENERATION_INTERVAL * 20
+  ) {
+    return MIN_DIFFICULTY;
+  }
+
   if(newestBlock.index % DIFFICULTY_ADJUSMENT_INTERVAL === 0 && newestBlock.index !== 0) {
     return calculateNewDifficulty(newestBlock, chain);
-  }else{
-    return newestBlock.difficulty;
   }
+  return lastRealDifficulty(chain);
 }
 
-const findDifficulty = () => difficultyForNext(getBlockChain());
+/*
+ * 특별(최소 난이도) 블록을 건너뛴 마지막 진짜 난이도.
+ * 조정 높이의 블록은 특별 블록이 아니므로 거기서 멈춘다.
+ * 메인넷에서는 그냥 끝 블록의 난이도다.
+ */
+const lastRealDifficulty = chain => {
+  if (!Params.current().allowMinDifficultyBlocks) {
+    return chain[chain.length - 1].difficulty;
+  }
+  let i = chain.length - 1;
+  while (
+    i > 0 &&
+    chain[i].index % DIFFICULTY_ADJUSMENT_INTERVAL !== 0 &&
+    chain[i].difficulty === MIN_DIFFICULTY
+  ) {
+    i--;
+  }
+  return chain[i].difficulty;
+};
+
+const findDifficulty = () => difficultyForNext(getBlockChain(), getTimestamp());
 
 // 난이도 계산기
+/*
+ * 조정 높이(10의 배수)에서 다음 난이도.
+ *
+ * 마지막 10블록이 걸린 시간을 목표(100초)와 견준다. 10블록의 시간은 그
+ * 앞 블록(index-10)의 타임스탬프에서 끝 블록까지다. 예전에는 index-9 부터
+ * 재서 9구간을 10구간으로 치는 바람에 "너무 빨랐다"로 기울었다 — 비트코인에
+ * 있는 것과 같은 오프바이원인데, 우리는 호환할 옛 체인이 없으니 고친다.
+ *
+ * 기준 난이도는 마지막 진짜 난이도다(테스트넷 특별 블록은 건너뛴다).
+ */
 const calculateNewDifficulty = (newestBlock, blockchain) => {
-  const lastCalculatedBlock = blockchain[blockchain.length - DIFFICULTY_ADJUSMENT_INTERVAL];
+  const windowStart = blockchain[blockchain.length - 1 - DIFFICULTY_ADJUSMENT_INTERVAL];
+  const base = lastRealDifficulty(blockchain);
   const timeExpected = BlOCK_GENERATION_INTERVAL * DIFFICULTY_ADJUSMENT_INTERVAL;
-  const timeTaken = newestBlock.timestamp - lastCalculatedBlock.timestamp;
+  const timeTaken = newestBlock.timestamp - windowStart.timestamp;
   if(timeTaken < timeExpected/2){
-    return lastCalculatedBlock.difficulty + 1;
+    return base + 1;
   }else if(timeTaken > timeExpected*2){
-    return Math.max(MIN_DIFFICULTY, lastCalculatedBlock.difficulty - 1);
+    return Math.max(MIN_DIFFICULTY, base - 1);
   }else{
-    return lastCalculatedBlock.difficulty;
+    return base;
   }
 }
 
@@ -292,13 +372,29 @@ const getPool = () => {
   if (pool !== null) {
     return pool;
   }
-  pool = [];
+  const workers = [];
   for (let i = 0; i < minerThreads(); i++) {
     const worker = new Worker(WORKER_PATH);
     // 풀 때문에 프로세스가 안 끝나는 일이 없게 한다
     worker.unref();
-    pool.push(worker);
+    /*
+     * 워커가 죽으면(예외, 메모리) 풀을 통째로 버린다. 다음 채굴이 새로 띄운다.
+     * 예전에는 죽은 워커가 풀에 남아, 그 워커에 보낸 일감은 영원히 답이 없었다
+     * — 워커가 하나면 채굴이 통째로 멎었다.
+     */
+    worker.once("exit", () => {
+      if (pool === workers) {
+        pool = null;
+        for (const other of workers) {
+          if (other !== worker) {
+            other.terminate();
+          }
+        }
+      }
+    });
+    workers.push(worker);
   }
+  pool = workers;
   return pool;
 };
 
@@ -332,6 +428,7 @@ const findBlockInWorkers = (index, previousHash, timestamp, data, difficulty) =>
     }
   };
 
+  let fail = null;
   const promise = new Promise((resolve, reject) => {
     const finish = fn => value => {
       if (settled) {
@@ -342,7 +439,7 @@ const findBlockInWorkers = (index, previousHash, timestamp, data, difficulty) =>
       fn(value);
     };
     const win = finish(resolve);
-    const fail = finish(reject);
+    fail = finish(reject);
 
     workers.forEach((worker, k) => {
       const onMessage = message => {
@@ -367,16 +464,19 @@ const findBlockInWorkers = (index, previousHash, timestamp, data, difficulty) =>
     });
   });
 
-  // 다른 노드가 먼저 블록을 올렸을 때 헛돌지 않게 한다
-  promise.cancel = () => {
-    if (settled) {
-      return;
-    }
-    for (const worker of workers) {
-      worker.postMessage({ type: "stop", jobId });
+  /*
+   * 다른 노드가 먼저 블록을 올렸을 때 헛돌지 않게 한다.
+   *
+   * promise 를 거절로 끝낸다 — 그래야 release() 가 돌아 워커에 붙인
+   * 리스너가 떨어지고 중단 신호가 간다. 예전에는 중단 신호만 보내고 promise 를
+   * 매달아 둬서, 블록 경쟁에서 질 때마다 워커마다 리스너가 하나씩 쌓였다
+   * (열 번쯤 지면 MaxListenersExceededWarning, 메모리는 계속 늘었다).
+   */
+  promise.cancel = reason => {
+    if (fail !== null) {
+      fail(reason instanceof Error ? reason : Error(reason || "채굴을 중단했습니다"));
     }
   };
-  promise.threads = stride;
   return promise;
 };
 
@@ -443,7 +543,10 @@ const isBlockValid = (candidateBlock, chainSoFar) => {
  */
 const isHeaderValid = (header, chainSoFar) => {
   const latestBlock = chainSoFar[chainSoFar.length - 1];
-  const expectedDifficulty = difficultyForNext(chainSoFar);
+  const expectedDifficulty = difficultyForNext(
+    chainSoFar,
+    header !== null && typeof header === "object" ? header.timestamp : undefined
+  );
 
   if(!isHeaderStructureValid(header)){
     console.log('The header structure is not valid');
@@ -628,9 +731,14 @@ const sumDifficulty = chainWork;
 // 블록체인 재배치
 const replaceChain = candidateChain => {
   const validated = isChainValid(candidateChain);
+  /*
+   * 무게는 검증을 마친 체인으로 잰다. 앞부분은 해시가 같아 검증을 건너뛴
+   * *우리* 블록이므로 상대가 그 자리의 difficulty 를 부풀려 보내도 소용없다.
+   * 후보 배열을 그대로 재면 그게 가능했다.
+   */
   if(
     validated !== null &&
-    sumDifficulty(candidateChain) > sumDifficulty(getBlockChain())
+    chainWork(validated.chain) > chainWork(getBlockChain())
   ){
     // 되돌려지는 블록에 담겼던 트랜잭션은 아직 유효할 수 있다.
     // 예전에는 그대로 사라져 버렸다.
@@ -977,7 +1085,7 @@ const sendTx = (address, amount, fee = 0) => {
     throw e;
   }
   addToMempool(tx, confirmed, nextHeight());
-  require("./p2p").broadcastMempool();
+  require("./p2p").broadcastTx(tx);
   return tx;
 };
 
@@ -1003,7 +1111,7 @@ const submitTx = tx => {
     throw Error(`id 가 내용과 맞지 않습니다 (계산값 ${expectedId})`);
   }
   addToMempool(tx, getUTxOutList(), nextHeight());
-  require("./p2p").broadcastMempool();
+  require("./p2p").broadcastTx(tx);
   return { id: tx.id, pending: true };
 };
 
@@ -1037,6 +1145,12 @@ module.exports = {
   replaceChain,
   countCommonPrefix,
   stopMiners,
+  // 테스트용 — 채굴 워커를 직접 다룬다
+  findBlockInWorkers,
+  getMinerPool: getPool,
+  MIN_DIFFICULTY,
+  BlOCK_GENERATION_INTERVAL,
+  DIFFICULTY_ADJUSMENT_INTERVAL,
   initChain,
   persistMempool,
   rebuildIndexes,
@@ -1046,6 +1160,7 @@ module.exports = {
   findTx,
   calculateNewDifficulty,
   difficultyForNext,
+  lastRealDifficulty,
   medianTimePast,
   MAX_FUTURE_BLOCK_TIME,
   isBlockValid,

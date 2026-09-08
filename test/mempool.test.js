@@ -84,6 +84,50 @@ test("블록에 담겨 UTxO 가 사라지면 pool 에서도 빠진다", () => {
   assert.strictEqual(Mempool.getMempool().length, 0);
 });
 
+test("부모가 pool 에 있는 자식(이어 쓰기)은 상관없는 블록이 붙어도 남는다", () => {
+  const owner = makeWallet();
+  const a = makeWallet();
+  const b = makeWallet();
+  const uTxOuts = [utxo(owner, "seed", 10 * COIN)];
+
+  // 부모: seed(10) -> a 4, owner 5 (수수료 1)
+  const parent = spend(owner, a.address, "seed", 10 * COIN, 4 * COIN, 5 * COIN);
+  // 자식: 부모의 잔돈 출력(index 1, 5) -> b 2, owner 2 (수수료 1)
+  const child = {
+    txIns: [{ txOutId: parent.id, txOutIndex: 1, signature: "" }],
+    txOuts: [
+      { address: b.address, amount: 2 * COIN },
+      { address: owner.address, amount: 2 * COIN }
+    ]
+  };
+  child.id = getTxId(child);
+  child.txIns[0].signature = toHexString(owner.keyPair.sign(child.id).toDER());
+
+  Mempool.updateMempool([]);
+  Mempool.addToMempool(parent, uTxOuts);
+  Mempool.addToMempool(child, uTxOuts);
+  assert.deepStrictEqual(Mempool.getMempool().map(tx => tx.id), [parent.id, child.id]);
+
+  // 둘과 무관한 블록이 붙었다: seed 는 그대로, 다른 UTxO 하나가 늘었다.
+  // 수정 전에는 확정 출력만 보고 자식을 버렸다.
+  Mempool.updateMempool([...uTxOuts, utxo(owner, "other", COIN)]);
+  assert.deepStrictEqual(Mempool.getMempool().map(tx => tx.id), [parent.id, child.id]);
+
+  // 부모가 블록에 담겼다: seed 가 사라지고 부모의 출력이 확정됐다 -> 자식만 남는다
+  Mempool.updateMempool([
+    { txOutId: parent.id, txOutIndex: 0, address: a.address, amount: 4 * COIN },
+    { txOutId: parent.id, txOutIndex: 1, address: owner.address, amount: 5 * COIN }
+  ]);
+  assert.deepStrictEqual(Mempool.getMempool().map(tx => tx.id), [child.id]);
+
+  // seed 가 다른 트랜잭션으로 쓰였다(부모 출력 없음) -> 자식도 함께 빠진다
+  Mempool.updateMempool([]);
+  Mempool.addToMempool(parent, uTxOuts);
+  Mempool.addToMempool(child, uTxOuts);
+  Mempool.updateMempool([utxo(owner, "other", COIN)]);
+  assert.deepStrictEqual(Mempool.getMempool(), []);
+});
+
 test("getMempool 이 준 배열을 밖에서 고쳐도 pool 은 그대로다", () => {
   /*
    * 얕은 복사다. 트랜잭션은 서명이 끝난 뒤로 아무도 고치지 않으므로
