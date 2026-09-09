@@ -13,6 +13,7 @@ const express = require("express"),
     Params = require("./params"),
     Target = require("./target"),
     Transport = require("./transport"),
+    Rpc = require("./rpc"),
     Store = require("./store"),
     crypto = require("crypto");
 
@@ -551,6 +552,33 @@ app.post("/transactions/raw", (req, res) => {
   } catch (e) {
     res.status(400).send(e.message);
   }
+});
+
+/* ------------------------------------------- 비트코인 호환 JSON-RPC
+ *
+ * 거래소·결제 업체의 연동 도구는 대개 비트코인 코어의 JSON-RPC 를 전제로
+ * 만들어져 있다. 같은 노드가 두 얼굴을 갖게 해서, 상대가 연동을 새로 짜지
+ * 않아도 되게 한다. 자세한 것은 src/rpc.js.
+ *
+ *   curl -X POST -H 'Content-Type: application/json' \
+ *     -d '{"jsonrpc":"2.0","id":1,"method":"getblockcount"}' localhost:3000/rpc
+ *
+ * 읽기 메서드는 공개, 지갑 메서드는 토큰이 필요하다. 배치(배열)도 받는다.
+ */
+app.post("/rpc", (req, res) => {
+  const body = req.body;
+  let authorized = AUTH_DISABLED;
+  if (!authorized) {
+    const header = req.get("Authorization") || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : req.get("X-Wallet-Token") || "";
+    authorized = tokenMatches(token);
+  }
+  /*
+   * 비트코인 코어는 HTTP 상태로 오류를 나타내기도 하지만, 대부분의 클라이언트
+   * 라이브러리는 본문의 error 를 본다. 항상 200 으로 주고 error 에 담는다 —
+   * 배치에서는 요청마다 결과가 달라 상태 하나로 나타낼 수 없기도 하다.
+   */
+  res.send(Rpc.call(body, authorized));
 });
 
 /* ------------------------------------------- 스크립트 (다중서명·타임락·HTLC)

@@ -86,6 +86,7 @@
 | GET  | `/address/:address` | 특정 주소 잔액 |
 | GET  | `/address/:address/transactions` | 주소의 트랜잭션 내역 (`?limit`, `?offset`) |
 | GET  | `/address/:address/utxos` | 주소가 가진 미사용 출력 |
+| POST | `/rpc` | 비트코인 호환 JSON-RPC (rpc.js). 지갑 메서드만 🔒 |
 
 
 ### transaction.js
@@ -158,6 +159,13 @@ secp256k1 키·서명(Node `crypto`). 비압축 공개키, DER low-S 서명, 검
 
 ### serialization.js
 트랜잭션·블록 헤더의 바이트 직렬화와 `sha256d`. txid 와 블록 해시가 여기서 나온다.
+`encodeTx`/`decodeTx`, `encodeBlock`/`decodeBlock` 은 해제 데이터까지 담은 raw
+hex — RPC 로 트랜잭션과 블록을 통째로 주고받을 때 쓴다(txid 미리보기와 별개다).
+
+### rpc.js
+비트코인 호환 JSON-RPC. `POST /rpc` 가 부른다. 안쪽 모듈을 그대로 두고 이름과
+응답 모양만 비트코인 코어 관례에 맞춘 껍데기다. 메서드 29개, 오류 코드도 저쪽
+것을 쓴다. 지갑 메서드는 토큰이 있어야 한다.
 
 ### address.js
 Base58Check 주소(`RIPEMD160(SHA256(공개키))`), 망 버전 바이트, 예전 형식 호환.

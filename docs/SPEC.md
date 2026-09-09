@@ -34,7 +34,7 @@ Base58Check(p) = Base58( p ‖ sha256d(p)[0..4) )
 | testnet | 스크립트 | `0xc4` | `2` |
 
 스크립트 주소는 공개키 대신 **조건(redeemScript)** 의 해시를 담는다.
-`주소 = Base58Check( scriptVersion ‖ RIPEMD160(SHA256(redeemScript)) )`. 3.6 참고.
+`주소 = Base58Check( scriptVersion ‖ RIPEMD160(SHA256(redeemScript)) )`. 3.7 참고.
 
 버전이 다르면 그 망에서 무효다. 비트코인 벡터: 공개키
 `0450863ad64a87ae8a2fe83c1af1a8403cb53f53e486d8511dad8a04887e5b23522cd470243453a299fa9e77237716103abc11a1df38855ed6f2ee187e9c582ba6`
@@ -89,25 +89,65 @@ txid = sha256d(위 바이트)
 각 입력의 `signature` = `sign(입력이 가리키는 출력 주소의 개인키, txid)`.
 모든 입력이 같은 txid 에 서명한다(SIGHASH_ALL 만 있다).
 
-### 3.3 유효 조건
+### 3.3 raw 형식 (전송용 전체 직렬화)
+
+3.1 은 txid 를 만드는 미리보기라 해제 데이터가 빠져 있다. 트랜잭션 하나를
+있는 그대로 주고받으려면(`sendrawtransaction`, `getrawtransaction`) 전부
+담은 형식이 필요하다.
+
+```
+varint 입력 수
+입력마다:  32바이트 txOutId
+           uint32  txOutIndex
+           varbytes signature
+           varbytes publicKey
+           varbytes redeemScript
+           varint  unlock 개수 ‖ unlock 마다 varbytes
+varint 출력 수
+출력마다:  varstr 주소 ‖ uint64 금액
+uint32 lockTime
+```
+
+- `varbytes` = varint 길이 ‖ 그만큼의 바이트. 없는 필드는 길이 0 이다.
+  길이 0 으로 읽은 `publicKey`/`redeemScript`/`unlock` 은 **필드 자체가 없던
+  것**으로 되살린다(빈 문자열이 아니다) — 그래야 다시 직렬화했을 때 같은
+  바이트가 나온다.
+- 읽고 나서 `id` 는 3.1 로 다시 계산한다. hex 에 적힌 id 를 믿지 않는다.
+- 남는 바이트가 있거나, varint 가 최소 길이로 적혀 있지 않거나, 금액이
+  2^53−1 을 넘으면 거부한다.
+- **3.1 과 독립이다.** 서명 바이트가 달라지면 raw hex 는 달라지지만 txid 는
+  같다.
+
+블록도 같은 방식으로 담는다(`getblock` verbosity 0):
+
+```
+88바이트 헤더(4.1) ‖ varint 트랜잭션 수 ‖ raw 트랜잭션들
+```
+
+블록 해시도 읽은 뒤 헤더에서 다시 계산한다.
+
+참고 구현: `src/serialization.js` 의 `encodeTx`/`decodeTx`,
+`encodeBlock`/`decodeBlock`.
+
+### 3.4 유효 조건
 
 1. `id == txid(직렬화)`
 2. 모든 입력이 현재 UTxOut 집합(같은 블록의 앞선 트랜잭션이 만든 출력 포함)에 있고 한 블록 안에서 같은 outpoint 를 두 번 쓰지 않는다
 3. 입력마다:
    - 주소가 예전 형식이면 그 공개키로, P2PKH 면 `publicKey` 가 그 주소의 해시와 맞고 그 공개키로 서명이 검증된다(low-S)
-   - P2SH 면 `hash160(redeemScript)` 가 주소와 맞고, `unlock` 을 스택에 올린 뒤 `redeemScript` 를 돌려 참이 남는다 (3.6)
+   - P2SH 면 `hash160(redeemScript)` 가 주소와 맞고, `unlock` 을 스택에 올린 뒤 `redeemScript` 를 돌려 참이 남는다 (3.7)
 4. 참조한 출력이 코인베이스면 `쓰는 높이 − 만들어진 높이 ≥ 10` (성숙도)
 5. 금액은 lm 양의 정수(uint64), `Σ입력 ≥ Σ출력`. 차액이 수수료
-6. `lockTime` 이 만족되었다 (3.5)
+6. `lockTime` 이 만족되었다 (3.6)
 7. 정책(합의 아님): 1000 lm 미만 출력은 지갑이 만들지 않는다(dust)
 
-### 3.4 코인베이스
+### 3.5 코인베이스
 
 블록의 첫 트랜잭션. 입력 하나 `{ txOutId: "", txOutIndex: <블록 높이>, signature: "" }`,
 출력 하나, 금액 = `보조금(높이) + 블록 안 수수료 합` 과 **정확히** 같아야 한다.
 `lockTime` 은 0 이어야 한다.
 
-### 3.5 lockTime
+### 3.6 lockTime
 
 "이 높이(또는 시각)가 되어야 블록에 담길 수 있다". 0 이면 제한이 없다.
 
@@ -121,7 +161,7 @@ txid = sha256d(위 바이트)
 앞당겨 남의 타임락을 일찍 열지 못하게 한다. 비트코인은 `lockTime < 높이`
 이지만 여기서는 `≤` 다(sequence 가 없어 끄는 길이 필요 없다).
 
-### 3.6 스크립트 (P2SH)
+### 3.7 스크립트 (P2SH)
 
 출력에는 조건 대신 조건의 해시만 담는다. 쓸 때 원본(`redeemScript`)과 해제
 데이터(`unlock`)를 함께 낸다.
@@ -209,7 +249,7 @@ CVE-2012-2459 를 막는다). 잎이 하나면 그것이 루트.
 | 타임스탬프 | 직전 11블록의 중앙값(MTP) **초과**, 검증 노드 시계 +2시간 이하 |
 | 연결 | `index = 직전+1`, `previousHash = 직전 hash` |
 | 머클 | `merkleRoot = 머클루트(data)` |
-| 본문 | 트랜잭션 ≤ 100건(코인베이스 포함), 첫 것이 코인베이스, 나머지가 3.3 을 순서대로 만족 |
+| 본문 | 트랜잭션 ≤ 100건(코인베이스 포함), 첫 것이 코인베이스, 나머지가 3.4 를 순서대로 만족 |
 
 ### 4.4 발행
 
@@ -362,7 +402,50 @@ ENC        { n: <번호>, c: <ChaCha20-Poly1305(JSON) ‖ 태그> }
 | `POST/DELETE /peers` | 피어 붙이기 / 잊기 |
 | `/me/*`, `POST /transactions` | 노드 지갑 (LIMCOIN_WALLET=off 면 503) |
 
-## 8. 환경 변수
+## 8. JSON-RPC (비트코인 호환)
+
+```
+POST /rpc   { "jsonrpc": "2.0", "id": 1, "method": "...", "params": [...] }
+         →  { "result": ..., "error": null, "id": 1 }
+```
+
+- 배열을 보내면 배치다. 같은 순서로 배열이 온다. 빈 배열은 `-32600`.
+- `params` 는 배열(위치) 또는 객체(이름). 없으면 빈 배열로 본다.
+- **HTTP 상태는 언제나 200.** 성공 여부는 `error` 로 본다(배치 때문에).
+- 금액은 LIM 소수다. REST 는 최소 단위(lm) 정수를 쓴다.
+- 지갑 메서드는 `Authorization: Bearer <토큰>` 이 필요하다. 없으면 `-4`.
+
+오류 코드는 비트코인 코어와 같다.
+
+| 코드 | 뜻 |
+|---|---|
+| `-1` / `-3` | 잡다한 실패 / 형이 틀림 |
+| `-4` | 지갑 문제(토큰 없음, `LIMCOIN_WALLET=off`) |
+| `-5` | 모르는 해시·주소 |
+| `-8` | 파라미터가 틀림 |
+| `-13` | 지갑이 잠김 |
+| `-26` | 규칙 위반으로 거절 |
+| `-27` | 이미 아는 트랜잭션 |
+| `-32600` / `-32601` / `-32602` / `-32603` | 요청·메서드·파라미터·내부 |
+
+| 갈래 | 메서드 |
+|---|---|
+| 체인 | `getblockcount` `getbestblockhash` `getblockhash` `getblock`(verbosity 0/1/2) `getblockheader` `getblockchaininfo` `getdifficulty` `getchaintips` |
+| 트랜잭션 | `getrawtransaction` `decoderawtransaction` `sendrawtransaction` `gettxout` `validateaddress` |
+| mempool | `getrawmempool` `getmempoolinfo` `estimatesmartfee` |
+| 망 | `getconnectioncount` `getnetworkinfo` `getpeerinfo` `uptime` `help` |
+| 지갑(토큰) | `getwalletinfo` `getnewaddress` `getbalance` `sendtoaddress` `listunspent` `listtransactions` `walletpassphrase` `walletlock` |
+
+비트코인과 다른 점: 출력에 스크립트 대신 주소가 들어가므로 `scriptPubKey` 의
+`hex`/`asm` 은 비어 있다. segwit 이 없어 `vsize == size`, `iswitness` 는 늘
+false, `sequence` 는 0. `getblocktemplate`/`submitblock`/`createrawtransaction`
+/`signrawtransactionwithkey`/`importaddress` 는 없다. 반대로 `getnetworkinfo`
+는 우리 것인 `nodeid`(6절 전송 암호화 신원)와 `encryption` 을 같이 준다.
+
+raw hex 형식은 3.3 이다. 자세한 연동 순서는
+[EXCHANGE.md 1.5절](EXCHANGE.md)에 있다.
+
+## 9. 환경 변수
 
 | | |
 |---|---|

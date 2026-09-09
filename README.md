@@ -12,7 +12,7 @@
 | 문서 | |
 |---|---|
 | [docs/SPEC.md](docs/SPEC.md) | 프로토콜 명세 — 직렬화, 주소, 합의 규칙, P2P, API. 다른 언어로 만들 때 맞출 것 |
-| [docs/EXCHANGE.md](docs/EXCHANGE.md) | 거래소 통합 — 지갑 없는 노드, 입금 감시, raw 출금, reorg 정책 |
+| [docs/EXCHANGE.md](docs/EXCHANGE.md) | 거래소 통합 — REST/JSON-RPC, 지갑 없는 노드, 입금 감시, raw 출금, reorg 정책 |
 | [docs/HISTORY.md](docs/HISTORY.md) | 설계 기록 — 무엇이 왜 바뀌었나 |
 | [docs/MODULES.md](docs/MODULES.md) | 모듈 지도 |
 
@@ -100,6 +100,11 @@ docker compose up          # 테스트넷 3노드: seed(채굴) + node-a + node-
 **API** — 읽기는 공개(CORS 허용), 지갑은 토큰. 외부에서 서명한 트랜잭션은
 `POST /transactions/raw`. 입금 감시는 `GET /blocks/since/:hash`. `/health`,
 `/metrics`(Prometheus). 권장 수수료 `GET /fees`. → [SPEC 7절](docs/SPEC.md#7-rest-api)
+
+**JSON-RPC** — 같은 노드가 `POST /rpc` 로 비트코인 코어와 같은 메서드를 받는다
+(`getblockcount`, `getblock`, `sendrawtransaction`, `gettxout`, `listunspent` …
+29개). 이미 비트코인용으로 만들어 둔 거래소·결제 도구를 새로 짜지 않고 붙일 수
+있다. 트랜잭션·블록은 raw hex 로도 오간다. → [SPEC 8절](docs/SPEC.md#8-json-rpc-비트코인-호환)
 
 ## 화폐 정책
 

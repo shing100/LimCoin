@@ -192,6 +192,251 @@ const serializeHeader = ({ version, index, previousHash, timestamp, merkleRoot, 
 
 const blockHashOf = header => sha256dHex(serializeHeader(header));
 
+/* ------------------------------------------- 읽기 (커서)
+ *
+ * 지금까지 직렬화는 한쪽으로만 갔다 — 해시를 내려고 바이트를 만들 뿐,
+ * 되읽을 일이 없었다. 밖에서 트랜잭션을 받을 때는 JSON 을 그대로 썼다.
+ *
+ * 거래소나 다른 언어 지갑이 쓰는 도구는 대개 "raw hex" 를 주고받는다.
+ * 되읽을 수 있어야 그 형식을 쓸 수 있다.
+ */
+const reader = hex => {
+  if (typeof hex !== "string" || !/^([0-9a-fA-F]{2})*$/.test(hex)) {
+    throw Error("hex 가 아닙니다");
+  }
+  return { buf: Buffer.from(hex, "hex"), at: 0 };
+};
+
+const need = (cursor, bytes) => {
+  if (cursor.at + bytes > cursor.buf.length) {
+    throw Error(`바이트가 모자랍니다 (${bytes} 더 필요, ${cursor.buf.length - cursor.at} 남음)`);
+  }
+};
+
+const readUInt32 = cursor => {
+  need(cursor, 4);
+  const value = cursor.buf.readUInt32LE(cursor.at);
+  cursor.at += 4;
+  return value;
+};
+
+const readUInt64 = cursor => {
+  need(cursor, 8);
+  const value = cursor.buf.readBigUInt64LE(cursor.at);
+  cursor.at += 8;
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw Error(`금액이 안전한 정수 범위를 넘습니다: ${value}`);
+  }
+  return Number(value);
+};
+
+const readVarint = cursor => {
+  need(cursor, 1);
+  const first = cursor.buf[cursor.at++];
+  if (first < 0xfd) {
+    return first;
+  }
+  if (first === 0xfd) {
+    need(cursor, 2);
+    const value = cursor.buf.readUInt16LE(cursor.at);
+    cursor.at += 2;
+    if (value < 0xfd) {
+      throw Error("varint 가 최소 표기가 아닙니다");
+    }
+    return value;
+  }
+  if (first === 0xfe) {
+    need(cursor, 4);
+    const value = cursor.buf.readUInt32LE(cursor.at);
+    cursor.at += 4;
+    if (value <= 0xffff) {
+      throw Error("varint 가 최소 표기가 아닙니다");
+    }
+    return value;
+  }
+  need(cursor, 8);
+  const value = cursor.buf.readBigUInt64LE(cursor.at);
+  cursor.at += 8;
+  if (value <= 0xffffffffn) {
+    throw Error("varint 가 최소 표기가 아닙니다");
+  }
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw Error("varint 가 너무 큽니다");
+  }
+  return Number(value);
+};
+
+const readHash = cursor => {
+  need(cursor, 32);
+  const hex = cursor.buf.subarray(cursor.at, cursor.at + 32).toString("hex");
+  cursor.at += 32;
+  return hex === ZERO_HASH ? "" : hex;
+};
+
+// varint 길이 + 바이트 -> hex
+const readVarBytes = cursor => {
+  const length = readVarint(cursor);
+  need(cursor, length);
+  const hex = cursor.buf.subarray(cursor.at, cursor.at + length).toString("hex");
+  cursor.at += length;
+  return hex;
+};
+
+// varint 길이 + UTF-8
+const readVarString = cursor => {
+  const length = readVarint(cursor);
+  need(cursor, length);
+  const text = cursor.buf.subarray(cursor.at, cursor.at + length).toString("utf8");
+  cursor.at += length;
+  return text;
+};
+
+const done = cursor => {
+  if (cursor.at !== cursor.buf.length) {
+    throw Error(`뒤에 ${cursor.buf.length - cursor.at}바이트가 남았습니다`);
+  }
+};
+
+/* ------------------------------------------- raw 트랜잭션
+ *
+ * txid 를 내는 직렬화(serializeTx)와 다르다. 그쪽은 "무엇을 어디로"만 덮어
+ * 서명이 바뀌어도 id 가 그대로다(malleability 없음). 이쪽은 망으로 보내고
+ * 디스크에 남기는 형식이라 해제 데이터까지 전부 들어간다.
+ *
+ *   varint 입력 수
+ *   입력마다: 32B txOutId | uint32 txOutIndex | varbytes signature |
+ *             varbytes publicKey | varbytes redeemScript |
+ *             varint unlock 수 | 항목마다 varbytes
+ *   varint 출력 수
+ *   출력마다: varstr 주소 | uint64 금액
+ *   uint32 lockTime
+ *
+ * id 는 담지 않는다. 되읽는 쪽이 내용에서 다시 계산한다 — 남이 적어 보낸
+ * id 를 믿을 이유가 없다.
+ */
+const writeVarBytes = hex => {
+  if (hex === undefined || hex === null || hex === "") {
+    return Buffer.from([0]);
+  }
+  if (typeof hex !== "string" || !/^([0-9a-fA-F]{2})*$/.test(hex)) {
+    throw Error(`hex 가 아닙니다: ${hex}`);
+  }
+  const bytes = Buffer.from(hex, "hex");
+  return Buffer.concat([writeVarint(bytes.length), bytes]);
+};
+
+const encodeTx = tx => {
+  if (tx === null || typeof tx !== "object" || !Array.isArray(tx.txIns) || !Array.isArray(tx.txOuts)) {
+    throw Error("트랜잭션 모양이 아닙니다");
+  }
+  const parts = [writeVarint(tx.txIns.length)];
+  for (const txIn of tx.txIns) {
+    const unlock = Array.isArray(txIn.unlock) ? txIn.unlock : [];
+    parts.push(
+      writeHash(txIn.txOutId),
+      writeUInt32(txIn.txOutIndex),
+      writeVarBytes(txIn.signature),
+      writeVarBytes(txIn.publicKey),
+      writeVarBytes(txIn.redeemScript),
+      writeVarint(unlock.length),
+      ...unlock.map(writeVarBytes)
+    );
+  }
+  parts.push(writeVarint(tx.txOuts.length));
+  for (const txOut of tx.txOuts) {
+    parts.push(writeString(txOut.address), writeUInt64(txOut.amount));
+  }
+  parts.push(writeUInt32(tx.lockTime || 0));
+  return Buffer.concat(parts).toString("hex");
+};
+
+// 커서에서 트랜잭션 하나를 읽는다 (블록 안에서도 쓴다)
+const readTx = cursor => {
+  const inputCount = readVarint(cursor);
+  if (inputCount === 0) {
+    throw Error("입력이 없습니다");
+  }
+  const txIns = [];
+  for (let i = 0; i < inputCount; i++) {
+    const txOutId = readHash(cursor);
+    const txOutIndex = readUInt32(cursor);
+    const signature = readVarBytes(cursor);
+    const publicKey = readVarBytes(cursor);
+    const redeemScript = readVarBytes(cursor);
+    const unlockCount = readVarint(cursor);
+    const unlock = [];
+    for (let k = 0; k < unlockCount; k++) {
+      unlock.push(readVarBytes(cursor));
+    }
+    const txIn = { txOutId, txOutIndex, signature };
+    // 없는 것은 넣지 않는다 — JSON 모양이 보내기 전과 같아야 한다
+    if (publicKey !== "") {
+      txIn.publicKey = publicKey;
+    }
+    if (redeemScript !== "") {
+      txIn.redeemScript = redeemScript;
+    }
+    if (unlockCount > 0) {
+      txIn.unlock = unlock;
+    }
+    txIns.push(txIn);
+  }
+  const outputCount = readVarint(cursor);
+  if (outputCount === 0) {
+    throw Error("출력이 없습니다");
+  }
+  const txOuts = [];
+  for (let i = 0; i < outputCount; i++) {
+    const address = readVarString(cursor);
+    const amount = readUInt64(cursor);
+    txOuts.push({ address, amount });
+  }
+  const lockTime = readUInt32(cursor);
+  const tx = { txIns, txOuts, lockTime, id: "" };
+  tx.id = txIdOf(tx);
+  return tx;
+};
+
+const decodeTx = hex => {
+  const cursor = reader(hex);
+  const tx = readTx(cursor);
+  done(cursor);
+  return tx;
+};
+
+/* ------------------------------------------- raw 블록
+ *
+ *   88바이트 헤더 | varint 트랜잭션 수 | raw 트랜잭션들
+ *
+ * 헤더에 hash 는 담지 않는다 — 헤더에서 바로 나온다.
+ */
+const encodeBlock = block =>
+  Buffer.concat([
+    serializeHeader(block),
+    writeVarint(block.data.length),
+    ...block.data.map(tx => Buffer.from(encodeTx(tx), "hex"))
+  ]).toString("hex");
+
+const decodeBlock = hex => {
+  const cursor = reader(hex);
+  const version = readUInt32(cursor);
+  const index = readUInt32(cursor);
+  const previousHash = readHash(cursor) || ZERO_HASH;
+  const timestamp = readUInt32(cursor);
+  const merkleRoot = readHash(cursor);
+  const bits = readUInt32(cursor);
+  need(cursor, 8);
+  const nonce = readUInt64(cursor);
+  const count = readVarint(cursor);
+  const data = [];
+  for (let i = 0; i < count; i++) {
+    data.push(readTx(cursor));
+  }
+  done(cursor);
+  const header = { version, index, previousHash, timestamp, merkleRoot, bits, nonce };
+  return { ...header, hash: blockHashOf(header), data };
+};
+
 module.exports = {
   sha256,
   sha256d,
@@ -210,5 +455,9 @@ module.exports = {
   SIGNATURE_BYTES,
   PUBLIC_KEY_BYTES,
   serializeHeader,
-  blockHashOf
+  blockHashOf,
+  encodeTx,
+  decodeTx,
+  encodeBlock,
+  decodeBlock
 };
