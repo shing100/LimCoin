@@ -915,6 +915,8 @@ const shutdown = async signal => {
   try {
     await Miner.stop();
     persistMempool();
+    // 다음에 뜰 때 체인을 전부 재생하지 않도록 UTxOut 집합을 남긴다
+    Blockchain.persistChainstate();
   } catch (e) {
     console.log(`종료 정리 중 문제가 있었습니다: ${e.message}`);
   }

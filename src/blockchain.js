@@ -40,6 +40,27 @@ const { indexByOutpoint } = require("./utxo");
 const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기(초)
 // 헤더 version. 규칙을 바꿀 때 채굴자가 새 값을 적어 찬성을 표시하는 자리다.
 const BLOCK_VERSION = 1;
+
+/*
+ * 되감을 수 있는 최대 깊이.
+ *
+ * 공개 해시레이트가 적은 체인의 가장 큰 위험은 "빌린 해시레이트로 처음부터
+ * 다시 캐서 더 무거운 체인을 내미는 것"이다. 무게만 보면 그런 체인이
+ * 이긴다. 그래서 우리가 이미 100블록 넘게 쌓은 자리는 다시 쓰지 않는다.
+ *
+ * 값을 치른다: 정말로 그만큼 뒤처진 노드는 스스로 따라잡지 못하고 갈라진
+ * 채로 남는다. 그때는 LIMCOIN_MAX_REORG_DEPTH=0 으로 끄고 다시 뜨거나
+ * 데이터 디렉터리를 비우고 처음부터 받아야 한다. 비트코인에는 이 규칙이
+ * 없다 — 해시레이트가 충분하면 필요 없기 때문이다.
+ */
+const configuredReorgDepth = Number.parseInt(process.env.LIMCOIN_MAX_REORG_DEPTH, 10);
+const MAX_REORG_DEPTH = Number.isInteger(configuredReorgDepth) ? configuredReorgDepth : 100;
+
+// undo 데이터를 들고 있을 깊이. 되감을 수 있는 깊이보다 넉넉해야 한다.
+const KEEP_UNDO = 200;
+
+// 스냅샷을 몇 블록마다 남길지
+const SNAPSHOT_INTERVAL = 500;
 /*
  * 타임스탬프 규칙. 비트코인과 같은 방식이다.
  *
@@ -511,6 +532,9 @@ const isBlockValid = (candidateBlock, chainSoFar) => {
     console.log('The candidate block structure is not valid');
     return false;
   }
+  if(violatesCheckpoint(candidateBlock)){
+    return false;
+  }
   if(!isHeaderValid(candidateBlock, chainSoFar)){
     return false;
   }
@@ -638,9 +662,38 @@ const rewindTo = common => {
   }
   let working = uTxOuts;
   for (let i = blockchain.length - 1; i >= common; i--) {
+    if (undoLog[i] === null) {
+      // 오래된 블록의 undo 는 버렸다(KEEP_UNDO). 그만큼 깊이 갈 일은 없지만.
+      console.log(`블록 #${i} 의 undo 데이터가 없습니다. 제네시스부터 다시 재생합니다.`);
+      return null;
+    }
     working = rollbackTxs(blockchain[i].data, working, undoLog[i]);
   }
   return working;
+};
+
+// 오래된 undo 데이터는 버린다. 배열 자리는 남겨 두어 인덱스가 어긋나지 않게 한다.
+const trimUndoLog = () => {
+  for (let i = undoLog.length - KEEP_UNDO - 1; i >= 0; i--) {
+    if (undoLog[i] === null) {
+      break;
+    }
+    undoLog[i] = null;
+  }
+};
+
+/*
+ * 체크포인트 — 그 높이의 블록은 반드시 정해진 해시여야 한다 (params.js).
+ * 그 높이보다 앞을 다시 쓰는 체인은 아무리 무거워도 받지 않는다.
+ */
+const violatesCheckpoint = block => {
+  for (const [height, hash] of Params.current().checkpoints) {
+    if (block.index === height && block.hash !== hash) {
+      console.log(`블록 #${height} 이 체크포인트(${hash})와 다릅니다: ${block.hash}`);
+      return true;
+    }
+  }
+  return false;
 };
 
 /**
@@ -682,6 +735,20 @@ const isChainValid = (candidateChain) => {
     };
 
     const common = countCommonPrefix(blockchain, candidateChain);
+
+    /*
+     * 우리가 이미 깊이 쌓은 자리를 다시 쓰려는 체인은 받지 않는다.
+     * 무게만 보면 이기는 체인이라도 그렇다 (MAX_REORG_DEPTH).
+     */
+    const rewindDepth = blockchain.length - common;
+    if (MAX_REORG_DEPTH > 0 && rewindDepth > MAX_REORG_DEPTH) {
+      console.log(
+        `${rewindDepth}블록을 되감으라는 체인입니다. 상한은 ${MAX_REORG_DEPTH} 입니다 ` +
+          `(LIMCOIN_MAX_REORG_DEPTH 로 조절).`
+      );
+      return null;
+    }
+
     const chain = blockchain.slice(0, common);
     const undo = undoLog.slice(0, common);
 
@@ -747,6 +814,9 @@ const replaceChain = candidateChain => {
     blockchain = validated.chain;
     uTxOuts = validated.uTxOuts;
     undoLog = validated.undo;
+    trimUndoLog();
+    // 갈아 끼웠으니 예전 스냅샷은 더 이상 이 체인의 것이 아니다
+    Store.dropChainstate();
 
     if (droppedFrom !== null) {
       AddressIndex.rollbackTo(droppedFrom);
@@ -888,9 +958,14 @@ const addBlockToChain = candidateBlock => {
         ChainIndex.applyBlock(candidateBlock);
         blockchain.push(candidateBlock);
         undoLog.push(collectConsumed(candidateBlock.data, uTxOuts));
+        trimUndoLog();
         uTxOuts = processedTxs;
         updateMempool(uTxOuts);
         Store.appendBlock(candidateBlock);
+        // 가끔 스냅샷을 남겨 다음에 뜰 때 전부 재생하지 않게 한다
+        if (candidateBlock.index % SNAPSHOT_INTERVAL === 0) {
+          persistChainstate();
+        }
         return true;
     }
     //return true;
@@ -955,14 +1030,29 @@ const findTx = txId => {
  * 저장된 블록을 하나씩 다시 검증하며 UTxOut 집합을 재구성한다. 검증에
  * 실패하는 블록이 나오면 거기서 멈춘다 — 뒤쪽은 P2P 로 다시 받으면 된다.
  */
+/*
+ * 메모리 상태를 제네시스만 있는 상태로 되돌린다.
+ *
+ * 데이터 디렉터리가 비어 있거나 제네시스가 바뀌었을 때 부른다. 예전에는
+ * 이때 아무것도 되돌리지 않고 그냥 돌아갔다 — 이미 체인을 들고 있던
+ * 프로세스가 빈 디렉터리로 다시 뜨면 메모리와 디스크가 어긋난 채로 돌았다.
+ */
+const resetToGenesis = () => {
+  blockchain = [genesisBlock];
+  uTxOuts = processTxs(genesisBlock.data, [], 0, 0);
+  undoLog = [collectConsumed(genesisBlock.data, [])];
+  rebuildIndexes();
+};
+
 const initChain = (dataDir) => {
   Store.open(dataDir);
   const persisted = Store.loadBlocks();
 
   if (persisted.length === 0) {
     // 처음 뜨는 노드. 제네시스만 저장해 둔다.
+    resetToGenesis();
     Store.appendBlock(genesisBlock);
-    return { restored: 0, height: 0 };
+    return { restored: 0, height: 0, fromSnapshot: false };
   }
 
   if (
@@ -973,10 +1063,41 @@ const initChain = (dataDir) => {
     console.log(
       "저장된 체인의 제네시스가 지금 genesis.json 과 다릅니다. 저장본을 버리고 새로 시작합니다."
     );
+    resetToGenesis();
     Store.writeBlocks([genesisBlock]);
     // 저 체인에 속하던 mempool 도 함께 버린다
     Store.saveMempool([]);
-    return { restored: 0, height: 0 };
+    Store.dropChainstate();
+    return { restored: 0, height: 0, fromSnapshot: false };
+  }
+
+  /*
+   * 스냅샷이 저장된 체인의 끝과 맞으면 전부 재생하지 않는다.
+   *
+   * 이미 우리가 받아들여 디스크에 적어 둔 블록들이다. 서명 검증을 다시
+   * 하는 데 체인 길이에 비례하는 시간이 든다 — 만 블록이면 몇 분이다.
+   * 어긋나면(파일을 손댔거나 도중에 죽었거나) 그냥 버리고 재생한다.
+   */
+  const snapshot = Store.loadChainstate();
+  const tip = persisted[persisted.length - 1];
+  if (
+    snapshot !== null &&
+    snapshot.tipHash === tip.hash &&
+    snapshot.height === persisted.length - 1 &&
+    Array.isArray(snapshot.uTxOuts) &&
+    Array.isArray(snapshot.undo)
+  ) {
+    blockchain = persisted;
+    uTxOuts = snapshot.uTxOuts;
+    // undo 는 끝쪽 KEEP_UNDO 개만 남겨 두었다. 앞자리는 null 로 채운다.
+    undoLog = new Array(persisted.length).fill(null);
+    const from = Math.max(0, persisted.length - snapshot.undo.length);
+    snapshot.undo.forEach((entry, at) => {
+      undoLog[from + at] = entry;
+    });
+    rebuildIndexes();
+    restoreMempool();
+    return { restored: persisted.length, height: tip.index, fromSnapshot: true };
   }
 
   let chain = [persisted[0]];
@@ -1002,6 +1123,7 @@ const initChain = (dataDir) => {
   blockchain = chain;
   uTxOuts = utxos;
   undoLog = undo;
+  trimUndoLog();
   rebuildIndexes();
   restoreMempool();
 
@@ -1009,15 +1131,39 @@ const initChain = (dataDir) => {
   if (chain.length !== persisted.length) {
     Store.writeBlocks(chain);
   }
+  persistChainstate();
 
-  return { restored: chain.length, height: chain[chain.length - 1].index };
+  return { restored: chain.length, height: chain[chain.length - 1].index, fromSnapshot: false };
 };
 
-// 색인은 체인을 처음부터 재생해야 만들 수 있다.
+/*
+ * UTxOut 집합을 스냅샷으로 남긴다. 뜰 때 이것이 있으면 전부 재생하지 않는다.
+ * undo 는 되감을 수 있는 깊이만큼만 남긴다 — 전부 두면 파일이 체인만큼 커진다.
+ */
+const persistChainstate = () => {
+  if (blockchain.length === 0) {
+    return;
+  }
+  const tip = blockchain[blockchain.length - 1];
+  Store.saveChainstate({
+    version: 1,
+    height: blockchain.length - 1,
+    tipHash: tip.hash,
+    uTxOuts,
+    undo: undoLog.slice(-KEEP_UNDO)
+  });
+};
+
+/*
+ * 색인을 다시 만든다.
+ *
+ * 블록은 받아들일 때 이미 검증했으므로 여기서는 반영만 한다 — 예전에는
+ * processTxs 를 불러 서명을 전부 다시 확인했다. 색인을 다시 만드는 데
+ * 체인을 통째로 재검증할 이유가 없다.
+ */
 const rebuildIndexes = () => {
   AddressIndex.rebuild(blockchain, (block, before) =>
-    // 이미 검증해 둔 블록이지만 재생도 같은 규칙으로 한다 — 그 블록 앞까지의 MTP
-    processTxs(block.data, before, block.index, medianTimePast(blockchain.slice(0, block.index)))
+    updateUTxOuts(block.data, before, block.index)
   );
   ChainIndex.rebuild(blockchain);
 };
@@ -1145,7 +1291,9 @@ module.exports = {
   getMinerPool: getPool,
   initChain,
   persistMempool,
+  persistChainstate,
   rebuildIndexes,
+  MAX_REORG_DEPTH,
   getTxProof,
   getBlockByHash,
   getBlockByHeight,

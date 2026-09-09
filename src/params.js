@@ -29,6 +29,14 @@ const NETWORKS = {
     // 시간을 앞당겨 적어 난이도를 피하는 길을 메인넷에는 두지 않는다
     allowMinDifficultyBlocks: false,
     lwmaWindow: 60,
+    /*
+     * 체크포인트 — [높이, 해시]. 그 높이의 블록은 반드시 이 해시여야 한다.
+     *
+     * 아직 공개 체인이 없어 비어 있다. 메인넷이 돌기 시작하면 여기에
+     * 적는다. 적어 두면 그 높이보다 앞을 다시 쓰는 체인은 아무리 무거워도
+     * 받지 않는다 — 빌린 해시레이트로 처음부터 다시 캐는 공격을 막는다.
+     */
+    checkpoints: [],
     // 뜰 때 붙어 볼 피어. 아직 없다 — 공개 시드 노드가 생기면 여기 적는다.
     seeds: []
   },
@@ -44,6 +52,7 @@ const NETWORKS = {
     // 200초 넘게 블록이 없으면 최소 난이도 블록을 받아 준다 (비트코인 테스트넷의 20분 규칙)
     allowMinDifficultyBlocks: true,
     lwmaWindow: 60,
+    checkpoints: [],
     seeds: []
   },
   // 한 기계에서 혼자 돌리는 시험용 망. 테스트넷 제네시스와 주소를 쓰되 매직이 다르다.
@@ -56,6 +65,7 @@ const NETWORKS = {
     defaultDataSubdir: "regtest",
     allowMinDifficultyBlocks: true,
     lwmaWindow: 8,
+    checkpoints: [],
     seeds: []
   }
 };
