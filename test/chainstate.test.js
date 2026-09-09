@@ -141,6 +141,38 @@ test("상한보다 깊이 되감으라는 체인은 더 무거워도 받지 않�
 
 /* ------------------------------------------- 체크포인트 */
 
+test("체크포인트보다 앞에서 갈라지는 체인은 무게와 무관하게 받지 않는다", () => {
+  const dir = tmpDir();
+  const params = Params.current();
+  try {
+    initChain(dir);
+    const genesis = getBlockChain()[0];
+    const ours = mineChainOnto(genesis, 4);
+    assert.strictEqual(replaceChain([genesis, ...ours]), true);
+    const tip = getBlockChain()[getBlockChain().length - 1].hash;
+
+    // 3번 블록을 못박아 둔다
+    params.checkpoints.push([3, getBlockChain()[3].hash]);
+    /*
+     * 2번에서 갈라지는 더 무거운 체인. 체크포인트 높이(3)에 블록이 있든
+     * 없든 받으면 안 된다 — 여기서는 아예 그보다 짧게 만들어, 블록마다
+     * 보는 검사로는 걸리지 않는 경우를 시험한다.
+     */
+    const rival = mineChainOnto(getBlockChain()[2], 1, 2000);
+    assert.strictEqual(replaceChain([...getBlockChain().slice(0, 3), ...rival]), false);
+    assert.strictEqual(getBlockChain()[getBlockChain().length - 1].hash, tip, "우리 체인 그대로");
+
+    // 체크포인트 뒤에서 갈라지는 것은 받는다
+    const later = mineChainOnto(getBlockChain()[3], 3, 3000);
+    assert.strictEqual(replaceChain([...getBlockChain().slice(0, 4), ...later]), true);
+    assert.strictEqual(getBlockChain().length, 7);
+  } finally {
+    params.checkpoints.pop();
+    Store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("체크포인트와 다른 블록은 받지 않는다", () => {
   const params = Params.current();
   const genesis = getBlockChain()[0];
