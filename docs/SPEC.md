@@ -352,4 +352,5 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 | `LIMCOIN_MAX_REORG_DEPTH` | 되감기 상한(기본 100). `0` 이면 상한 없음 |
 | `LIMCOIN_MAX_MEMPOOL_BYTES` | mempool 바이트 상한(기본 5,000,000) |
 | `LIMCOIN_MAX_MEMPOOL_TXS` | mempool 건수 상한(기본 5000) |
+| `LIMCOIN_BLOCK_CACHE` | 메모리에 두는 블록 본문 수(기본 600). 나머지는 필요할 때 디스크에서 읽는다 |
 | `LIMCOIN_WALLET_PASSPHRASE` | 지갑 파일 암호. 뜰 때 자동으로 풀거나 걸 때 쓴다 |

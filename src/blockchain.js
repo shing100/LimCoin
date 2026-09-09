@@ -124,10 +124,89 @@ const genesisBlock = new Block(
   genesisData.nonce
 );
 
-// 블록체인
+/* ------------------------------------------- 블록 본문은 디스크에
+ *
+ * 체인을 통째로 메모리에 들고 있었다. 300블록·트랜잭션 1457건짜리 작은
+ * 체인에서도 본문이 863KB 로 전체의 63% 였고, 이 몫은 체인이 길어지는 만큼
+ * 끝없이 는다. 반면 UTxOut 집합은 "아직 안 쓴 출력"만큼만 늘고, 헤더는
+ * 블록당 300바이트다.
+ *
+ * 그래서 메모리에는 헤더만 두고, 본문은 필요할 때 그 줄만 디스크에서
+ * 읽는다(store.js 의 readBlockAt). 읽어 온 본문은 최근 것만 캐시에 남긴다.
+ *
+ * 부르는 쪽은 달라지지 않는다 — 헤더 객체의 `data` 는 getter 라서
+ * `block.data` 도, JSON.stringify(block) 도 그대로 된다. 저장소를 열지
+ * 않았으면(테스트) 본문을 버리지 않고 다 들고 있는다.
+ */
+const configuredCache = Number.parseInt(process.env.LIMCOIN_BLOCK_CACHE, 10);
+const BODY_CACHE_SIZE = Number.isInteger(configuredCache) && configuredCache > 0 ? configuredCache : 600;
+const bodyCache = new Map(); // height -> data
+
+const cacheBody = (height, data) => {
+  bodyCache.delete(height);
+  bodyCache.set(height, data);
+  if (Store.isOpen()) {
+    while (bodyCache.size > BODY_CACHE_SIZE) {
+      // Map 은 넣은 순서를 지킨다. 가장 오래된 것부터 버린다.
+      bodyCache.delete(bodyCache.keys().next().value);
+    }
+  }
+};
+
+const bodyAt = height => {
+  if (bodyCache.has(height)) {
+    const data = bodyCache.get(height);
+    // 최근에 쓴 것으로 옮겨 둔다
+    bodyCache.delete(height);
+    bodyCache.set(height, data);
+    return data;
+  }
+  const stored = Store.readBlockAt(height);
+  if (stored === null) {
+    return undefined;
+  }
+  cacheBody(height, stored.data);
+  return stored.data;
+};
+
+/*
+ * 본문을 떼어 낸 헤더 기록. `data` 는 그때그때 읽어 온다.
+ * height 는 배열에서의 자리다(제네시스가 0). block.index 와 같다.
+ */
+const headerRecordOf = (block, height) => {
+  const record = {
+    version: block.version,
+    index: block.index,
+    hash: block.hash,
+    previousHash: block.previousHash,
+    timestamp: block.timestamp,
+    merkleRoot: block.merkleRoot,
+    bits: block.bits,
+    nonce: block.nonce
+  };
+  Object.defineProperty(record, "data", {
+    enumerable: true,
+    configurable: true,
+    get: () => bodyAt(height)
+  });
+  return record;
+};
+
+// 헤더 기록으로 이루어진 체인을 만든다. 본문이 있는 것은 캐시에 넣어 둔다.
+const toHeaderChain = blocks =>
+  blocks.map((block, height) => {
+    const own = Object.getOwnPropertyDescriptor(block, "data");
+    if (own !== undefined && own.get === undefined) {
+      cacheBody(height, block.data);
+    }
+    return headerRecordOf(block, height);
+  });
+
+// 블록체인 (헤더만. 본문은 위 getter 로 읽는다)
 let blockchain = [genesisBlock];
 
-let uTxOuts = processTxs(blockchain[0].data, [], 0, 0);
+let uTxOuts = processTxs(genesisBlock.data, [], 0, 0);
+blockchain = toHeaderChain([genesisBlock]);
 AddressIndex.applyBlock(genesisBlock, []);
 ChainIndex.applyBlock(genesisBlock);
 
@@ -809,14 +888,35 @@ const replaceChain = candidateChain => {
      */
     const droppedFrom =
       validated.common < blockchain.length ? blockchain[validated.common].index : null;
-    const dropped = blockchain.slice(validated.common);
+    /*
+     * 밀려나는 블록의 본문은 지금 확정해 둔다.
+     *
+     * 헤더 기록의 data 는 "그 높이의 본문"을 읽는 getter 다. 체인을 갈아
+     * 끼우고 나면 같은 높이에 새 블록이 앉으므로, 나중에 읽으면 새 블록의
+     * 본문이 나온다 — 색인에서 지울 트랜잭션을 엉뚱하게 고르게 된다.
+     */
+    const dropped = blockchain.slice(validated.common).map(block => ({ ...block }));
 
-    blockchain = validated.chain;
+    /*
+     * 저장소는 갈라진 지점에서 잘라 내고 새 블록만 이어 붙인다. 예전에는
+     * 파일을 통째로 다시 썼다 — 한두 블록 갈라지자고 만 블록을 다시 쓰는
+     * 셈이었다.
+     *
+     * 본문이 아직 손에 있는 지금 쓴다. 헤더 기록으로 바꾼 뒤에 쓰려 하면
+     * 캐시에서 밀려난 본문을 디스크에서 찾게 되는데, 그 자리는 방금 잘라
+     * 냈으므로 없다.
+     */
+    Store.truncateBlocksTo(validated.common);
+    for (let i = validated.common; i < validated.chain.length; i++) {
+      Store.appendBlock(validated.chain[i]);
+    }
+    // 갈아 끼웠으니 예전 스냅샷은 더 이상 이 체인의 것이 아니다
+    Store.dropChainstate();
+
+    blockchain = toHeaderChain(validated.chain);
     uTxOuts = validated.uTxOuts;
     undoLog = validated.undo;
     trimUndoLog();
-    // 갈아 끼웠으니 예전 스냅샷은 더 이상 이 체인의 것이 아니다
-    Store.dropChainstate();
 
     if (droppedFrom !== null) {
       AddressIndex.rollbackTo(droppedFrom);
@@ -831,8 +931,6 @@ const replaceChain = candidateChain => {
     }
 
     updateMempool(uTxOuts);
-    // 체인 교체는 append 로 표현할 수 없으므로 파일을 새로 쓴다
-    Store.writeBlocks(blockchain);
     reinstateTxs(orphaned);
     require('./p2p').broadcastNewBlock();
     return true;
@@ -956,7 +1054,8 @@ const addBlockToChain = candidateBlock => {
         // uTxOuts 를 갈아 끼우기 전에 먼저 갱신한다.
         AddressIndex.applyBlock(candidateBlock, uTxOuts);
         ChainIndex.applyBlock(candidateBlock);
-        blockchain.push(candidateBlock);
+        cacheBody(blockchain.length, candidateBlock.data);
+        blockchain.push(headerRecordOf(candidateBlock, blockchain.length));
         undoLog.push(collectConsumed(candidateBlock.data, uTxOuts));
         trimUndoLog();
         uTxOuts = processedTxs;
@@ -1038,7 +1137,8 @@ const findTx = txId => {
  * 프로세스가 빈 디렉터리로 다시 뜨면 메모리와 디스크가 어긋난 채로 돌았다.
  */
 const resetToGenesis = () => {
-  blockchain = [genesisBlock];
+  bodyCache.clear();
+  blockchain = toHeaderChain([genesisBlock]);
   uTxOuts = processTxs(genesisBlock.data, [], 0, 0);
   undoLog = [collectConsumed(genesisBlock.data, [])];
   rebuildIndexes();
@@ -1046,94 +1146,126 @@ const resetToGenesis = () => {
 
 const initChain = (dataDir) => {
   Store.open(dataDir);
-  const persisted = Store.loadBlocks();
+  bodyCache.clear();
+  AddressIndex.reset();
+  ChainIndex.reset();
 
-  if (persisted.length === 0) {
+  /*
+   * 저장된 체인을 한 번만 훑는다.
+   *
+   * 예전에는 파일을 통째로 배열에 올린 뒤(체인 크기만큼 메모리) 검증하고,
+   * 그러고도 색인을 만들려고 한 번 더 훑었다. 이제 한 줄씩 읽으면서 그
+   * 자리에서 반영하고 본문은 흘려보낸다 — 메모리에 남는 것은 헤더뿐이다.
+   *
+   * 스냅샷이 저장된 체인의 끝과 맞으면 서명 검증을 건너뛴다. 이미 우리가
+   * 받아들여 적어 둔 블록들이고, 서명 검증이 시작 비용의 대부분이다.
+   * UTxOut 집합과 색인은 어차피 다시 쌓아야 하므로(주소 색인은 입력이
+   * 가리키는 이전 출력을 되짚어야 한다) 그 부분은 늘 재생한다.
+   */
+  const snapshot = Store.loadChainstate();
+  /*
+   * 스냅샷이 가리키는 높이까지는 검증을 건너뛴다. 그 높이의 해시가 스냅샷과
+   * 같은지 그 자리에서 확인하고, 다르면 스냅샷을 버리고 처음부터 다시 한다.
+   * 스냅샷 뒤에 더 붙은 블록(스냅샷을 남기기 전에 죽은 경우)은 검증한다.
+   */
+  const skipUntil = snapshot !== null && typeof snapshot.tipHash === "string" ? snapshot.height : -1;
+  const headers = [];
+  let utxos = [];
+  let undo = [];
+  let stoppedAt = null;
+  let genesisMismatch = false;
+  let staleSnapshot = false;
+  let skipped = 0;
+
+  const scanned = Store.scanBlocks((block, height) => {
+    if (stoppedAt !== null || staleSnapshot) {
+      return;
+    }
+    const trusted = height <= skipUntil;
+    if (trusted && height === skipUntil && block.hash !== snapshot.tipHash) {
+      staleSnapshot = true;
+      return;
+    }
+    if (height === 0) {
+      if (block.hash !== genesisBlock.hash || getMerkleRoot(block.data) !== genesisBlock.merkleRoot) {
+        genesisMismatch = true;
+        stoppedAt = 0;
+        return;
+      }
+    } else if (!trusted && !isBlockValid(block, headers)) {
+      console.log(`저장된 블록 #${block.index} 이 유효하지 않습니다. 여기까지만 복원합니다.`);
+      stoppedAt = height;
+      return;
+    }
+    if (trusted) {
+      skipped++;
+    }
+
+    const consumed = collectConsumed(block.data, utxos);
+    const processed = trusted
+      ? updateUTxOuts(block.data, utxos, block.index)
+      : processTxs(block.data, utxos, block.index, medianTimePast(headers));
+    if (processed === null) {
+      console.log(`저장된 블록 #${block.index} 의 트랜잭션을 처리할 수 없습니다. 여기까지만 복원합니다.`);
+      stoppedAt = height;
+      return;
+    }
+    // 주소 색인은 이 블록 이전의 UTxOut 으로 입력을 되짚는다
+    AddressIndex.applyBlock(block, utxos);
+    ChainIndex.applyBlock(block);
+    headers.push(headerRecordOf(block, height));
+    undo.push(consumed);
+    utxos = processed;
+  });
+
+  if (scanned === 0) {
     // 처음 뜨는 노드. 제네시스만 저장해 둔다.
     resetToGenesis();
     Store.appendBlock(genesisBlock);
     return { restored: 0, height: 0, fromSnapshot: false };
   }
 
-  if (
-    persisted[0].hash !== genesisBlock.hash ||
-    getMerkleRoot(persisted[0].data) !== genesisBlock.merkleRoot
-  ) {
+  if (genesisMismatch) {
     // genesis.json 을 새로 만들었는데 옛 체인이 남아 있는 경우
     console.log(
       "저장된 체인의 제네시스가 지금 genesis.json 과 다릅니다. 저장본을 버리고 새로 시작합니다."
     );
-    resetToGenesis();
     Store.writeBlocks([genesisBlock]);
+    resetToGenesis();
     // 저 체인에 속하던 mempool 도 함께 버린다
     Store.saveMempool([]);
     Store.dropChainstate();
     return { restored: 0, height: 0, fromSnapshot: false };
   }
 
-  /*
-   * 스냅샷이 저장된 체인의 끝과 맞으면 전부 재생하지 않는다.
-   *
-   * 이미 우리가 받아들여 디스크에 적어 둔 블록들이다. 서명 검증을 다시
-   * 하는 데 체인 길이에 비례하는 시간이 든다 — 만 블록이면 몇 분이다.
-   * 어긋나면(파일을 손댔거나 도중에 죽었거나) 그냥 버리고 재생한다.
-   */
-  const snapshot = Store.loadChainstate();
-  const tip = persisted[persisted.length - 1];
-  if (
-    snapshot !== null &&
-    snapshot.tipHash === tip.hash &&
-    snapshot.height === persisted.length - 1 &&
-    Array.isArray(snapshot.uTxOuts) &&
-    Array.isArray(snapshot.undo)
-  ) {
-    blockchain = persisted;
-    uTxOuts = snapshot.uTxOuts;
-    // undo 는 끝쪽 KEEP_UNDO 개만 남겨 두었다. 앞자리는 null 로 채운다.
-    undoLog = new Array(persisted.length).fill(null);
-    const from = Math.max(0, persisted.length - snapshot.undo.length);
-    snapshot.undo.forEach((entry, at) => {
-      undoLog[from + at] = entry;
-    });
-    rebuildIndexes();
-    restoreMempool();
-    return { restored: persisted.length, height: tip.index, fromSnapshot: true };
+  if (staleSnapshot) {
+    // 스냅샷이 이 체인의 것이 아니었다. 버리고 처음부터 다시 한다.
+    console.log("스냅샷이 저장된 체인과 맞지 않습니다. 전부 재생합니다.");
+    Store.dropChainstate();
+    return initChain(dataDir);
   }
 
-  let chain = [persisted[0]];
-  let undo = [collectConsumed(persisted[0].data, [])];
-  let utxos = processTxs(persisted[0].data, [], 0, 0);
+  const tip = headers[headers.length - 1];
 
-  for (let i = 1; i < persisted.length; i++) {
-    const block = persisted[i];
-    if (!isBlockValid(block, chain)) {
-      console.log(`저장된 블록 #${block.index} 이 유효하지 않습니다. 여기까지만 복원합니다.`);
-      break;
-    }
-    const processed = processTxs(block.data, utxos, block.index, medianTimePast(chain));
-    if (processed === null) {
-      console.log(`저장된 블록 #${block.index} 의 트랜잭션을 처리할 수 없습니다. 여기까지만 복원합니다.`);
-      break;
-    }
-    chain.push(block);
-    undo.push(collectConsumed(block.data, utxos));
-    utxos = processed;
-  }
-
-  blockchain = chain;
+  blockchain = headers;
   uTxOuts = utxos;
   undoLog = undo;
   trimUndoLog();
-  rebuildIndexes();
-  restoreMempool();
 
   // 중간에 잘렸다면 파일도 맞춰 준다
-  if (chain.length !== persisted.length) {
-    Store.writeBlocks(chain);
+  if (stoppedAt !== null) {
+    Store.truncateBlocksTo(headers.length);
+    Store.dropChainstate();
   }
+  restoreMempool();
   persistChainstate();
 
-  return { restored: chain.length, height: chain[chain.length - 1].index, fromSnapshot: false };
+  return {
+    restored: headers.length,
+    height: tip.index,
+    fromSnapshot: skipped > 0,
+    verified: headers.length - skipped
+  };
 };
 
 /*

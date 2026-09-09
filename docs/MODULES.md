@@ -11,6 +11,12 @@
 4. compileTarget / hashMeetsCompiled 채굴 루프용 빠른 비교
 
 
+### store.js
+1. scanBlocks 한 줄씩 훑기 (줄 위치 기록)
+2. readBlockAt 블록 하나만 읽기
+3. truncateBlocksTo 갈라진 지점부터 잘라 내기
+4. loadChainstate / saveChainstate UTxOut 스냅샷
+
 ### script.js
 1. parse, toAsm, compile 스크립트 읽기/쓰기
 2. run 스택 기계 (OP_CHECKMULTISIG, OP_CHECKLOCKTIMEVERIFY, OP_IF/ELSE …)

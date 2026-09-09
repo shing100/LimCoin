@@ -39,14 +39,49 @@ const defaultDir = () =>
     String(process.env.HTTP_PORT || 3000)
   );
 
+/*
+ * 블록 하나하나가 파일 어디에서 시작하는지 (줄 시작 바이트 위치).
+ *
+ * 이게 있으면 블록 #N 을 읽으려고 파일을 통째로 읽지 않아도 된다. 노드가
+ * 메모리에 블록 본문을 들고 있지 않아도 되는 근거가 여기다 — 필요할 때만
+ * 그 줄만 읽는다.
+ */
+let offsets = [];
+let fileSize = 0;
+let fd = null;
+
+const closeFd = () => {
+  if (fd !== null) {
+    try {
+      fs.closeSync(fd);
+    } catch (e) {
+      // 이미 닫혔다
+    }
+    fd = null;
+  }
+};
+
+const readFd = () => {
+  if (fd === null) {
+    fd = fs.openSync(blocksPath(), "r");
+  }
+  return fd;
+};
+
 const open = (dataDir = defaultDir()) => {
+  closeFd();
   dir = dataDir;
   fs.mkdirSync(dir, { recursive: true });
+  offsets = [];
+  fileSize = fs.existsSync(blocksPath()) ? fs.statSync(blocksPath()).size : 0;
   return dir;
 };
 
 const close = () => {
+  closeFd();
   dir = null;
+  offsets = [];
+  fileSize = 0;
 };
 
 const isOpen = () => dir !== null;
@@ -82,11 +117,139 @@ const readLines = (file, what) => {
 
 const loadBlocks = () => (isOpen() ? readLines(blocksPath(), "저장된 체인") : []);
 
+/* ------------------------------------------- 블록을 한 줄씩
+ *
+ * 노드가 뜰 때 파일을 통째로 메모리에 올리면 체인 크기만큼 메모리가 든다.
+ * 블록 본문은 대개 다시 볼 일이 없다(UTxOut 집합만 있으면 된다). 그래서
+ * 한 줄씩 읽어 넘겨 주고, 줄이 파일 어디에서 시작하는지만 적어 둔다.
+ * 나중에 그 블록이 필요하면 그 줄만 다시 읽는다(readBlockAt).
+ *
+ * 마지막 줄은 append 도중 죽었을 수 있어 깨져 있을 수 있다. 그런 줄은
+ * 버리고 거기까지만 돌려준다 — 어차피 P2P 로 다시 받아 오면 된다.
+ */
+const scanBlocks = onBlock => {
+  offsets = [];
+  if (!isOpen() || !fs.existsSync(blocksPath())) {
+    fileSize = 0;
+    return 0;
+  }
+  closeFd();
+  const EOL_BYTES = Buffer.byteLength(os.EOL);
+  const stream = fs.openSync(blocksPath(), "r");
+  const buffer = Buffer.alloc(1 << 20);
+  let carry = Buffer.alloc(0);
+  let position = 0;
+  let lineStart = 0;
+  let count = 0;
+  let broken = false;
+
+  try {
+    for (;;) {
+      const read = fs.readSync(stream, buffer, 0, buffer.length, position);
+      if (read === 0) {
+        break;
+      }
+      let chunk = Buffer.concat([carry, buffer.subarray(0, read)]);
+      position += read;
+      let at;
+      let consumed = 0;
+      while ((at = chunk.indexOf("\n", consumed)) !== -1) {
+        const line = chunk.subarray(consumed, at).toString("utf8").trim();
+        const lineBytes = at - consumed + 1;
+        if (line !== "") {
+          let parsed = null;
+          try {
+            parsed = JSON.parse(line);
+          } catch (e) {
+            console.log(`저장된 체인의 ${count + 1}번째 줄이 깨져 있습니다. 여기까지만 복원합니다.`);
+            broken = true;
+          }
+          if (broken) {
+            break;
+          }
+          offsets.push(lineStart);
+          onBlock(parsed, count);
+          count++;
+        }
+        lineStart += lineBytes;
+        consumed = at + 1;
+      }
+      if (broken) {
+        break;
+      }
+      carry = chunk.subarray(consumed);
+    }
+    /*
+     * 개행 없이 끝난 꼬리는 append 도중 죽은 흔적이다. 그대로 두면 다음
+     * append 가 그 뒤에 붙어 한 줄에 두 블록이 들어간다.
+     */
+    if (!broken && carry.toString("utf8").trim() !== "") {
+      console.log(`저장된 체인의 마지막 줄이 잘려 있습니다. 여기까지만 복원합니다.`);
+      broken = true;
+    }
+  } finally {
+    fs.closeSync(stream);
+  }
+  fileSize = broken ? lineStart : fs.statSync(blocksPath()).size;
+  if (broken) {
+    // 깨진 줄부터 뒤를 잘라 낸다. 다음 append 가 이어 붙을 수 있어야 한다.
+    fs.truncateSync(blocksPath(), fileSize);
+  }
+  void EOL_BYTES;
+  return count;
+};
+
+const blockCount = () => offsets.length;
+
+/*
+ * 블록 하나만 읽는다. 파일 전체가 아니라 그 줄의 바이트 범위만 읽는다.
+ */
+const readBlockAt = height => {
+  if (!isOpen() || height < 0 || height >= offsets.length) {
+    return null;
+  }
+  const from = offsets[height];
+  const to = height + 1 < offsets.length ? offsets[height + 1] : fileSize;
+  const length = to - from;
+  if (length <= 0) {
+    return null;
+  }
+  const buffer = Buffer.alloc(length);
+  fs.readSync(readFd(), buffer, 0, length, from);
+  try {
+    return JSON.parse(buffer.toString("utf8").trim());
+  } catch (e) {
+    console.log(`저장된 블록 #${height} 을 읽을 수 없습니다.`);
+    return null;
+  }
+};
+
+/*
+ * count 번째 블록부터 뒤를 잘라 낸다 (체인 교체).
+ *
+ * 예전에는 파일을 통째로 다시 썼다. 갈라지는 것은 보통 마지막 한두
+ * 블록인데 만 블록을 다시 쓰는 셈이었다. 자를 자리를 이미 알고 있으므로
+ * 그 바이트에서 끊으면 된다.
+ */
+const truncateBlocksTo = count => {
+  if (!isOpen() || count >= offsets.length) {
+    return;
+  }
+  const size = count === 0 ? 0 : offsets[count];
+  closeFd();
+  fs.truncateSync(blocksPath(), size);
+  offsets.length = count;
+  fileSize = size;
+};
+
 const appendBlock = block => {
   if (!isOpen()) {
     return;
   }
-  fs.appendFileSync(blocksPath(), JSON.stringify(block) + os.EOL);
+  const line = JSON.stringify(block) + os.EOL;
+  offsets.push(fileSize);
+  fileSize += Buffer.byteLength(line);
+  fs.appendFileSync(blocksPath(), line);
 };
 
 // 체인이 통째로 교체될 때(reorg). 임시 파일에 쓰고 rename 해서
@@ -102,7 +265,16 @@ const writeBlocks = blocks => {
   if (!isOpen()) {
     return;
   }
+  closeFd();
   writeAtomically(blocksPath(), blocks);
+  // 오프셋을 다시 잰다
+  offsets = [];
+  let at = 0;
+  for (const block of blocks) {
+    offsets.push(at);
+    at += Buffer.byteLength(JSON.stringify(block) + os.EOL);
+  }
+  fileSize = at;
 };
 
 /*
@@ -170,6 +342,10 @@ module.exports = {
   open,
   close,
   isOpen,
+  scanBlocks,
+  readBlockAt,
+  truncateBlocksTo,
+  blockCount,
   loadChainstate,
   saveChainstate,
   dropChainstate,
