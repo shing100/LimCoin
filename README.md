@@ -15,6 +15,8 @@
 | [docs/EXCHANGE.md](docs/EXCHANGE.md) | 거래소 통합 — REST/JSON-RPC, 지갑 없는 노드, 입금 감시, raw 출금, reorg 정책 |
 | [docs/HISTORY.md](docs/HISTORY.md) | 설계 기록 — 무엇이 왜 바뀌었나 |
 | [docs/MODULES.md](docs/MODULES.md) | 모듈 지도 |
+| [docs/vectors.json](docs/vectors.json) | 합의 테스트 벡터 — 다른 구현이 맞춰 볼 값 |
+| [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) | 취약점 알리기 / 기여 / 변경 기록 |
 
 ## 시작하기
 
@@ -135,15 +137,17 @@ reorg 정책, 체크리스트는 [docs/EXCHANGE.md](docs/EXCHANGE.md).
 ## 개발
 
 ```bash
-yarn test                    # 전체 282건
+yarn test                    # 전체 294건
 yarn lint                    # eslint — 오타 전역, 안 쓰는 변수, 삼킨 예외
 yarn coverage                # 줄·분기 커버리지
 yarn fuzz                    # 퍼징만. LIMCOIN_FUZZ_SEED 로 씨앗을 바꾼다
+yarn vectors                 # 합의 벡터 다시 쓰기 (--check 면 확인만)
+yarn release                 # dist/ 에 tar.gz + SHA256SUMS
 node --test test/sync.test.js
 node scripts/generate-genesis.js --network testnet   # 제네시스 다시 만들기 (모든 노드가 공유해야 한다)
 ```
 
-테스트는 Node 내장 `node:test` 로 282건. 실제로 nonce 를 찾아 블록을 만들고
+테스트는 Node 내장 `node:test` 로 294건. 실제로 nonce 를 찾아 블록을 만들고
 (`test/helpers.js`), 두세 노드를 띄워 동기화·reorg·피어 발견을 확인하는 식이다.
 암호 기본 요소는 외부 벡터(비트코인 주소, secp256k1 G, sha256d)로 맞춘다.
 줄 커버리지는 93%.
@@ -154,9 +158,25 @@ node scripts/generate-genesis.js --network testnet   # 제네시스 다시 만�
 목표값이 쉬워지면 일한 양이 준다. 실제로 raw 디코더의 왕복이 깨지는 자리를
 여기서 찾았다.
 
-CI(GitHub Actions)는 Node 20·22·24 에서 린트·테스트·커버리지를 돌리고,
-퍼저는 씨앗 셋으로 따로 돌리고, 컨테이너를 실제로 띄워 블록 하나를 만들어
-본다.
+`docs/vectors.json` 은 "이 입력이면 이 답"을 박아 둔 합의 테스트 벡터다.
+다른 언어로 만드는 사람이 맞춰 볼 값이자, 우리 쪽에서는 리팩터링이 규칙을
+바꿔 버렸는지 잡는 그물이다 — `node scripts/vectors.js --check`.
+
+CI(GitHub Actions)는 Node 20·22·24 에서 린트·테스트·커버리지·벡터 확인을
+돌리고, 퍼저는 씨앗 셋으로 따로 돌리고, 릴리스를 두 번 만들어 해시가 같은지
+보고, 컨테이너를 실제로 띄워 블록 하나를 만들어 본다.
+
+### 릴리스
+
+```bash
+yarn release              # dist/limcoin-<판>.tar.gz + dist/SHA256SUMS
+cd dist && sha256sum -c SHA256SUMS
+```
+
+같은 커밋에서 두 번 돌리면 같은 해시가 나온다(파일 시각·소유자·권한을
+고정하고 이름순으로 담는다). 받은 사람이 "내가 받은 것이 저쪽이 만든 그것"
+인지 확인할 수 있어야 하기 때문이다. 지갑 파일·노드 키·체인 데이터는 담기지
+않는다.
 
 무엇을 왜 바꿨는지는 [docs/HISTORY.md](docs/HISTORY.md) 에 있다. 짧게는 —
 2018년 코드는 Linux 에서 뜨지 않았고, 서명 검증이 죽은 코드였고, 제네시스

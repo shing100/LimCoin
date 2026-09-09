@@ -445,7 +445,36 @@ false, `sequence` 는 0. `getblocktemplate`/`submitblock`/`createrawtransaction`
 raw hex 형식은 3.3 이다. 자세한 연동 순서는
 [EXCHANGE.md 1.5절](EXCHANGE.md)에 있다.
 
-## 9. 환경 변수
+## 9. 테스트 벡터
+
+[vectors.json](vectors.json) 에 입력과 답이 짝지어 있다. 다른 언어로 구현할
+때 여기부터 맞춰라 — 문서에는 늘 애매한 데가 남고, 그 애매함이 그대로 체인
+분기가 된다.
+
+| 절 | 무엇 |
+|---|---|
+| `keys` | 개인키 → 공개키 → hash160 → 주소 (메인넷·테스트넷) |
+| `base58check` | 페이로드 hex → Base58Check 문자열 |
+| `scripts` | 2-of-3 multisig, CLTV, HTLC 의 redeemScript·asm·P2SH 주소 |
+| `scriptNumbers` | 스크립트 숫자의 최소 길이 리틀엔디언 표기 |
+| `signature` | low-S 서명 하나와 그 high-S 짝 — 앞은 받고 뒤는 거부해야 한다 |
+| `transactions` | 트랜잭션 → 3.1 직렬화 hex·txid, 3.3 raw hex, 크기 |
+| `blocks` | 제네시스 두 개의 88바이트 헤더 hex·해시·머클 루트·raw 블록 |
+| `merkle` | 잎 1~9개의 루트와 첫 잎의 증명 (홀수 층 처리) |
+| `target` | bits ↔ 목표값 ↔ 일한 양 ↔ 난이도 |
+| `lwma` | 창이 찬 체인의 다음 bits (정속·2배 빠름·4배 느림) |
+| `units` | LIM ↔ lm 변환, 높이별 블록 보조금 |
+
+값은 전부 코드에서 뽑는다(`scripts/vectors.js`). 손으로 고치지 말 것.
+`node scripts/vectors.js --check` 가 지금 코드와 같은지 확인한다 — CI 가
+매번 돌린다.
+
+**서명 바이트는 벡터가 아니다.** ECDSA 는 k 를 난수로 뽑으므로 같은 키·같은
+메시지라도 서명이 매번 다르다. 그래서 `signature` 절은 만드는 쪽이 아니라
+**확인하는 쪽**을 고정한다: 박아 둔 low-S 서명은 받아들여야 하고, 같은 (r, s)
+에서 s 를 n−s 로 바꾼 짝은 거부해야 한다.
+
+## 10. 환경 변수
 
 | | |
 |---|---|

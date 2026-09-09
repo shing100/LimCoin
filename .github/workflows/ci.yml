@@ -37,6 +37,9 @@ jobs:
       - name: 커버리지
         run: yarn coverage
 
+      - name: 합의 벡터가 코드와 같은지
+        run: node scripts/vectors.js --check
+
   # 퍼저는 씨앗을 바꿔 가며 돌린다. 고정 씨앗만 돌리면 그 한 줄기만 본다.
   fuzz:
     runs-on: ubuntu-latest
@@ -56,6 +59,44 @@ jobs:
         run: yarn fuzz
         env:
           LIMCOIN_FUZZ_SEED: ${{ matrix.seed }}
+
+  # 릴리스 산출물이 만들어지고, 두 번 만들면 같은 해시가 나오는지 본다.
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 두 번 만들어 해시를 견준다
+        run: |
+          node scripts/release.js > /dev/null
+          FIRST=$(cat dist/SHA256SUMS)
+          node scripts/release.js > /dev/null
+          SECOND=$(cat dist/SHA256SUMS)
+          echo "$FIRST"
+          test "$FIRST" = "$SECOND" || { echo "재현되지 않는다"; exit 1; }
+          cd dist && sha256sum -c SHA256SUMS
+      - name: 풀어서 노드가 뜨는지
+        run: |
+          mkdir -p /tmp/unpack && tar xzf dist/limcoin-*.tar.gz -C /tmp/unpack
+          cd /tmp/unpack/limcoin-*
+          test ! -e src/wallet.json && test ! -e src/privateKey
+          yarn install --frozen-lockfile --production
+          LIMCOIN_NETWORK=regtest HTTP_PORT=3100 LIMCOIN_DATA_DIR=/tmp/rel-chain \
+            LIMCOIN_WALLET_FILE=/tmp/rel-wallet.json LIMCOIN_WALLET_TOKEN=none \
+            node src/server.js &
+          for i in $(seq 1 30); do
+            if curl -sf localhost:3100/health > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf localhost:3100/health
+      - uses: actions/upload-artifact@v4
+        with:
+          name: limcoin-tarball
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
 
   # 컨테이너가 실제로 뜨고 블록을 만드는지 본다.
   docker:

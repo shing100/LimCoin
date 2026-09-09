@@ -26,3 +26,6 @@ yarn-error.log*
 
 # 체인 저장 파일
 data/
+
+# 릴리스 산출물 (scripts/release.js)
+dist/
