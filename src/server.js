@@ -128,6 +128,14 @@ const requireWallet = (req, res, next) => {
     res.status(503).send("이 노드는 지갑 없이 돕니다 (LIMCOIN_WALLET=off). 외부에서 서명해 POST /transactions/raw 로 보내세요.");
     return;
   }
+  /*
+   * 암호가 걸린 지갑은 풀기 전에는 아무것도 못 한다 — 주소마저 씨앗에서
+   * 나오기 때문이다. 423 Locked 로 그렇다고 알려 준다.
+   */
+  if (Wallet.isLocked()) {
+    res.status(423).send("지갑이 잠겨 있습니다. POST /me/unlock 으로 암호를 주세요.");
+    return;
+  }
   next();
 };
 
@@ -276,6 +284,41 @@ app.get("/me/addresses", requireWalletAuth, requireWallet, (req, res) => {
  * 그건 UTxOut 집합을 가진 노드만 할 수 있다. 주소 색인이 블록에 대해
  * 하는 일을 mempool 에 대해 하는 셈이라, 응답 모양도 색인과 맞춘다.
  */
+/* ------------------------------------------- 지갑 잠그기
+ *
+ * 지갑 파일에는 니모닉이 들어간다. 파일 권한(0600)은 같은 기계의 다른
+ * 사용자를 막을 뿐, 백업이나 훔쳐 간 디스크에는 소용이 없다.
+ * scrypt + AES-256-GCM 으로 파일 자체를 잠근다.
+ */
+app.get("/me/lockstatus", requireWalletAuth, (req, res) => {
+  res.send({ encrypted: Wallet.isEncrypted(), locked: Wallet.isLocked() });
+});
+
+// 암호 걸기·바꾸기. 빈 값이면 푼다(평문으로 되돌린다).
+app.post("/me/passphrase", requireWalletAuth, requireWallet, (req, res) => {
+  try {
+    const { passphrase } = req.body || {};
+    res.send(Wallet.setPassphrase(passphrase === undefined ? "" : passphrase));
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
+});
+
+// 잠긴 지갑 풀기. requireWallet 을 걸지 않는다 — 잠겨 있어야 부르는 것이므로.
+app.post("/me/unlock", requireWalletAuth, (req, res) => {
+  try {
+    Wallet.unlock((req.body || {}).passphrase);
+    res.send({ locked: false });
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
+});
+
+app.post("/me/lock", requireWalletAuth, (req, res) => {
+  Wallet.lock();
+  res.send({ locked: Wallet.isLocked() });
+});
+
 /*
  * 이 지갑의 공개키들. 다중서명 주소를 만들려면 참여자끼리 공개키를 주고받아야
  * 한다. 공개키는 비밀이 아니다 — 주소를 만들고 서명을 확인하는 데만 쓴다.
