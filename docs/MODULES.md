@@ -11,6 +11,17 @@
 4. compileTarget / hashMeetsCompiled 채굴 루프용 빠른 비교
 
 
+### script.js
+1. parse, toAsm, compile 스크립트 읽기/쓰기
+2. run 스택 기계 (OP_CHECKMULTISIG, OP_CHECKLOCKTIMEVERIFY, OP_IF/ELSE …)
+3. multisig, timeLocked, hashTimeLocked 표준 스크립트
+4. describe 표준 꼴 알아보기
+
+### target.js
+1. targetFromBits, bitsFromTarget 압축 목표값
+2. workOf, difficultyOf 무게와 표시용 난이도
+3. nextTargetBits LWMA 난이도 조정
+
 ### memPool.js
 1. addToMempool
 2. getMempool

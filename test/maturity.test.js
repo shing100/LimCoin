@@ -130,7 +130,8 @@ test("아직 묻히지 않은 코인베이스를 쓰는 트랜잭션은 mempool 
   const miner = makeWallet();
   const receiver = makeWallet();
   const { uTxOuts } = minedAt(miner, 5);
-  const spend = spendOutput(miner, receiver.address, uTxOuts[0], uTxOuts[0].amount);
+  // 최소 릴레이 수수료(4 lm/byte)를 넘기게 조금 남긴다
+  const spend = spendOutput(miner, receiver.address, uTxOuts[0], uTxOuts[0].amount - 10000);
 
   Mempool.updateMempool([]);
   assert.throws(
@@ -154,7 +155,7 @@ test("체인이 짧아져 다시 어려진 코인베이스는 블록에 담기�
   const miner = makeWallet();
   const receiver = makeWallet();
   const { uTxOuts } = minedAt(miner, 5);
-  const spend = spendOutput(miner, receiver.address, uTxOuts[0], uTxOuts[0].amount);
+  const spend = spendOutput(miner, receiver.address, uTxOuts[0], uTxOuts[0].amount - 10000);
 
   Mempool.updateMempool([]);
   Mempool.addToMempool(spend, uTxOuts, 5 + COINBASE_MATURITY);

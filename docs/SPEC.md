@@ -26,10 +26,15 @@
 Base58Check(p) = Base58( p ‖ sha256d(p)[0..4) )
 ```
 
-| 망 | version | 첫 글자 |
-|---|---|---|
-| mainnet | `0x30` | `L` |
-| testnet | `0x6f` | `m` 또는 `n` |
+| 망 | 종류 | version | 첫 글자 |
+|---|---|---|---|
+| mainnet | 공개키 (P2PKH) | `0x30` | `L` |
+| mainnet | 스크립트 (P2SH) | `0x32` | `M` |
+| testnet | 공개키 | `0x6f` | `m` 또는 `n` |
+| testnet | 스크립트 | `0xc4` | `2` |
+
+스크립트 주소는 공개키 대신 **조건(redeemScript)** 의 해시를 담는다.
+`주소 = Base58Check( scriptVersion ‖ RIPEMD160(SHA256(redeemScript)) )`. 3.6 참고.
 
 버전이 다르면 그 망에서 무효다. 비트코인 벡터: 공개키
 `0450863ad64a87ae8a2fe83c1af1a8403cb53f53e486d8511dad8a04887e5b23522cd470243453a299fa9e77237716103abc11a1df38855ed6f2ee187e9c582ba6`
@@ -44,8 +49,17 @@ Base58Check(p) = Base58( p ‖ sha256d(p)[0..4) )
 {
   "id":     "<hex 64>",
   "txIns":  [{ "txOutId": "<hex 64>", "txOutIndex": 0, "publicKey": "<hex 130>", "signature": "<DER hex>" }],
-  "txOuts": [{ "address": "<주소>", "amount": 300000000 }]
+  "txOuts": [{ "address": "<주소>", "amount": 300000000 }],
+  "lockTime": 0
 }
+```
+
+스크립트 주소를 쓰는 입력은 `publicKey`/`signature` 대신 `redeemScript` 와
+`unlock` 을 싣는다.
+
+```json
+{ "txOutId": "<hex 64>", "txOutIndex": 0, "signature": "",
+  "redeemScript": "<hex>", "unlock": ["<hex>", "<hex>"] }
 ```
 
 ### 3.1 직렬화와 txid
@@ -55,6 +69,7 @@ varint 입력 수
 입력마다:  32바이트 txOutId ‖ uint32 txOutIndex
 varint 출력 수
 출력마다:  varstr 주소 ‖ uint64 금액
+uint32 lockTime
 
 txid = sha256d(위 바이트)
 ```
@@ -63,8 +78,11 @@ txid = sha256d(위 바이트)
 바이트가 바뀌어도 txid 는 같다(malleability 없음). 코인베이스의 빈 `txOutId`
 는 0 32바이트로 직렬화한다.
 
-예: 입력 `ab×32 : 1`, 출력 `"LimAddr"` 1000 lm →
-`01 ab…ab 01000000 01 07 4c696d41646472 e803000000000000`
+해제 데이터(`signature`, `publicKey`, `redeemScript`, `unlock`)는 어느 것도
+들어가지 않는다.
+
+예: 입력 `ab×32 : 1`, 출력 `"LimAddr"` 1000 lm, lockTime 0 →
+`01 ab…ab 01000000 01 07 4c696d41646472 e803000000000000 00000000`
 
 ### 3.2 서명
 
@@ -75,15 +93,86 @@ txid = sha256d(위 바이트)
 
 1. `id == txid(직렬화)`
 2. 모든 입력이 현재 UTxOut 집합(같은 블록의 앞선 트랜잭션이 만든 출력 포함)에 있고 한 블록 안에서 같은 outpoint 를 두 번 쓰지 않는다
-3. 입력마다: 참조한 출력의 주소가 예전 형식이면 그 공개키로, 아니면 `publicKey` 가 그 주소의 해시와 맞고 그 공개키로 서명이 검증된다(low-S)
+3. 입력마다:
+   - 주소가 예전 형식이면 그 공개키로, P2PKH 면 `publicKey` 가 그 주소의 해시와 맞고 그 공개키로 서명이 검증된다(low-S)
+   - P2SH 면 `hash160(redeemScript)` 가 주소와 맞고, `unlock` 을 스택에 올린 뒤 `redeemScript` 를 돌려 참이 남는다 (3.6)
 4. 참조한 출력이 코인베이스면 `쓰는 높이 − 만들어진 높이 ≥ 10` (성숙도)
 5. 금액은 lm 양의 정수(uint64), `Σ입력 ≥ Σ출력`. 차액이 수수료
-6. 정책(합의 아님): 1000 lm 미만 출력은 지갑이 만들지 않는다(dust)
+6. `lockTime` 이 만족되었다 (3.5)
+7. 정책(합의 아님): 1000 lm 미만 출력은 지갑이 만들지 않는다(dust)
 
 ### 3.4 코인베이스
 
 블록의 첫 트랜잭션. 입력 하나 `{ txOutId: "", txOutIndex: <블록 높이>, signature: "" }`,
 출력 하나, 금액 = `보조금(높이) + 블록 안 수수료 합` 과 **정확히** 같아야 한다.
+`lockTime` 은 0 이어야 한다.
+
+### 3.5 lockTime
+
+"이 높이(또는 시각)가 되어야 블록에 담길 수 있다". 0 이면 제한이 없다.
+
+| lockTime | 뜻 | 담길 수 있는 조건 |
+|---|---|---|
+| `0` | 제한 없음 | 언제나 |
+| `< 500000000` | 블록 높이 | `lockTime ≤ 그 블록의 높이` |
+| `≥ 500000000` | 유닉스 시각 | `lockTime ≤ 그 블록의 MTP` |
+
+시각은 채굴자의 시계가 아니라 직전 11블록의 중앙값(MTP)과 견준다 — 시계를
+앞당겨 남의 타임락을 일찍 열지 못하게 한다. 비트코인은 `lockTime < 높이`
+이지만 여기서는 `≤` 다(sequence 가 없어 끄는 길이 필요 없다).
+
+### 3.6 스크립트 (P2SH)
+
+출력에는 조건 대신 조건의 해시만 담는다. 쓸 때 원본(`redeemScript`)과 해제
+데이터(`unlock`)를 함께 낸다.
+
+```
+검증 = hash160(redeemScript) == 주소의 해시
+     그리고 run(unlock 을 스택에 올린 뒤 redeemScript) 의 결과가 참이고 스택에 값이 하나만 남는다
+```
+
+`unlock` 은 **데이터 배열**이다(hex 문자열). 연산자는 넣을 수 없다.
+서명 대상은 언제나 `txid` 다.
+
+**연산자**
+
+| 코드 | 이름 | 하는 일 |
+|---|---|---|
+| `0x00` | `OP_0` | 빈 값(거짓)을 올린다 |
+| `0x01`–`0x4b` | (직접 push) | 그 길이만큼 데이터를 올린다 |
+| `0x4c` | `OP_PUSHDATA1` | 다음 1바이트가 길이 |
+| `0x51`–`0x60` | `OP_1`–`OP_16` | 작은 수를 올린다 |
+| `0x63` `0x64` `0x67` `0x68` | `OP_IF` `OP_NOTIF` `OP_ELSE` `OP_ENDIF` | 갈래 |
+| `0x69` | `OP_VERIFY` | 참이 아니면 실패 |
+| `0x75` `0x76` | `OP_DROP` `OP_DUP` | 버리기 / 복제 |
+| `0x87` `0x88` | `OP_EQUAL` `OP_EQUALVERIFY` | 같은가 |
+| `0xa8` `0xa9` | `OP_SHA256` `OP_HASH160` | 해시 |
+| `0xac` `0xad` | `OP_CHECKSIG` `OP_CHECKSIGVERIFY` | 서명 확인 |
+| `0xae` `0xaf` | `OP_CHECKMULTISIG` `OP_CHECKMULTISIGVERIFY` | m-of-n 서명 확인 |
+| `0xb1` | `OP_CHECKLOCKTIMEVERIFY` | `tx.lockTime ≥ 스택 값` 인지 (단위도 같아야) |
+
+`OP_CHECKMULTISIG` 은 `<m> <공개키…> <n>` 을 팝하고 서명 `m` 개를 팝한다.
+비트코인의 "하나 더 버리는" 버그는 넣지 않았다. 서명은 공개키와 같은 순서여야
+한다.
+
+**한도** — 스크립트 1000바이트, push 520바이트, 스택 100, 연산자 200,
+서명 검증 20회. 숫자는 최소 표기 리틀 엔디언 부호 있는 정수(최대 4바이트,
+CLTV 만 5바이트).
+
+**표준 꼴**
+
+```
+다중서명   <m> <pub…> <n> OP_CHECKMULTISIG
+           해제: [sig…]  (공개키 순서대로 m 개)
+
+타임락     <lockTime> OP_CHECKLOCKTIMEVERIFY OP_DROP OP_DUP OP_HASH160 <pkh> OP_EQUALVERIFY OP_CHECKSIG
+           해제: [sig, pub]  + tx.lockTime ≥ lockTime
+
+HTLC       OP_IF OP_SHA256 <hash> OP_EQUALVERIFY OP_DUP OP_HASH160 <받는쪽 pkh>
+           OP_ELSE <lockTime> OP_CHECKLOCKTIMEVERIFY OP_DROP OP_DUP OP_HASH160 <보낸쪽 pkh>
+           OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
+           해제: 받는 쪽 [sig, pub, preimage, 01] / 보낸 쪽 [sig, pub, ""]
+```
 
 ## 4. 블록
 
@@ -133,6 +222,17 @@ CVE-2012-2459 를 막는다). 잎이 하나면 그것이 루트.
 평균 해시 횟수의 합. 더 무거운 유효 체인이 이긴다. 같은 무게면 먼저 본 것.
 API 와 P2P 에서는 10진 문자열로 나타낸다(64비트를 넘는다).
 
+두 가지 제동이 있다(합의 규칙이 아니라 노드 정책이다).
+
+| | |
+|---|---|
+| 체크포인트 | `params.checkpoints` 의 `[높이, 해시]`. 그 높이의 블록은 그 해시여야 한다 |
+| 되감기 상한 | 우리 끝에서 `MAX_REORG_DEPTH`(기본 100)블록보다 깊이 되감으라는 체인은 거부. `LIMCOIN_MAX_REORG_DEPTH=0` 이면 끈다 |
+
+되감기 상한은 값을 치른다: 그만큼 뒤처진 노드는 스스로 따라잡지 못한다.
+공개 해시레이트가 적은 동안 "빌린 해시레이트로 처음부터 다시 캐기"를 막는
+장치이고, 해시레이트가 충분해지면 필요 없다.
+
 ## 5. 망
 
 | | mainnet | testnet | regtest |
@@ -164,6 +264,22 @@ WebSocket, 메시지는 JSON `{ "type", "data" }`. 한 메시지 ≤ 8MB.
 locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제네시스까지의 해시.
 동기화는 헤더 먼저(검증·무게 비교) → 더 무거울 때만 블록.
 
+**못된 피어.** 잘못할 때마다 점수를 더하고 100점이면 끊은 뒤 그 주소를 하루
+동안 받지 않는다.
+
+| | 점수 |
+|---|---|
+| JSON 이 아니거나 모양이 어긋난 메시지 | 10 |
+| 검증에서 떨어지는 블록·헤더 | 50 |
+| 초당 50건(순간 200건) 초과 | 25 |
+| 다른 망 | 100 (바로) |
+
+달라고 한 적 없는 응답, 우리가 이미 더 무거워 접는 동기화 같은 것은 벌하지
+않는다. `GET /peers/banned` 로 보고, `DELETE /peers/banned`(토큰)로 푼다.
+
+전송은 암호화되지 않는다. 공개 노드는 `wss://` 뒤에 두는 것을 권한다
+(리버스 프록시에서 TLS 를 끝내고 `LIMCOIN_PUBLIC_URL=wss://…` 로 알린다).
+
 ## 7. REST API
 
 인증이 필요한 것은 `Authorization: Bearer <토큰>` (`LIMCOIN_WALLET_TOKEN`).
@@ -184,12 +300,33 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 | `GET /peers` · `GET /peers/known` | |
 | `GET /search/:q` | 높이·해시·주소 판별 |
 
+### 공개 (스크립트)
+
+| | |
+|---|---|
+| `POST /script/address` | `{type: "multisig"|"timelock"|"htlc"|"raw", …}` → `{address, redeemScript, asm, script}` |
+| `POST /script/decode` | `{redeemScript}` → 주소와 읽은 내용 |
+| `POST /transactions/build` | `{inputs, outputs, lockTime}` → 서명하지 않은 트랜잭션과 서명 대상(txid) |
+| `GET /peers/banned` | 한동안 받지 않기로 한 주소들 |
+
 ### 공개 (쓰기)
 | | |
 |---|---|
 | `POST /transactions/raw` | 서명된 트랜잭션 JSON. 유효하면 `{ id, pending: true }`, 아니면 400 과 이유 |
 
 ### 토큰 필요
+
+지갑 파일에 암호가 걸려 있고 아직 풀지 않았으면 지갑 엔드포인트는 `423 Locked`
+를 돌려준다.
+
+| | |
+|---|---|
+| `GET /me/lockstatus` | `{encrypted, locked}` |
+| `POST /me/passphrase` | 암호 걸기·바꾸기. 빈 값이면 푼다(평문으로) |
+| `POST /me/unlock` | 잠긴 지갑 풀기 |
+| `POST /me/lock` | 다시 잠그기(메모리에서 암호를 지운다) |
+| `GET /me/publickeys` | 다중서명 주소를 만들 때 쓸 이 지갑의 공개키들 |
+| `POST /me/sign` | `{tx \| txId, publicKey}` → 그 키로 한 서명 |
 | | |
 |---|---|
 | `POST /blocks` | 한 블록 채굴 |
@@ -212,3 +349,7 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 | `LIMCOIN_MINER_THREADS` | 채굴 워커 수 |
 | `LIMCOIN_PEERS` | 뜰 때 붙을 피어, 쉼표 구분 |
 | `LIMCOIN_PUBLIC_URL` | 남이 나에게 걸 수 있는 주소 |
+| `LIMCOIN_MAX_REORG_DEPTH` | 되감기 상한(기본 100). `0` 이면 상한 없음 |
+| `LIMCOIN_MAX_MEMPOOL_BYTES` | mempool 바이트 상한(기본 5,000,000) |
+| `LIMCOIN_MAX_MEMPOOL_TXS` | mempool 건수 상한(기본 5000) |
+| `LIMCOIN_WALLET_PASSPHRASE` | 지갑 파일 암호. 뜰 때 자동으로 풀거나 걸 때 쓴다 |

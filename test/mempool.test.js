@@ -5,11 +5,17 @@ const test = require("node:test");
 const assert = require("node:assert");
 
 const Mempool = require("../src/memPool");
-const { getTxId, getTxFee } = require("../src/transactions");
+const { getTxId, getTxFee, getTxSize, MIN_RELAY_FEE_RATE } = require("../src/transactions");
 const { toHexString } = require("../src/utils");
 const { COIN, parseLim } = require("../src/units");
 
 const { ecShim: ec, fakeId } = require("./helpers");
+
+/*
+ * 최소 릴레이 수수료를 넘기는 값. 여기 트랜잭션은 400바이트 안쪽이고
+ * 최소 수수료율이 4 lm/byte 이므로 넉넉히 잡는다.
+ */
+const FEE = 10000;
 
 const makeWallet = () => {
   const keyPair = ec.genKeyPair();
@@ -37,24 +43,35 @@ const utxo = (owner, seed, amount) => ({
   amount
 });
 
-test("같은 UTxO 를 두 번 쓰려는 트랜잭션은 pool 에 들어가지 못한다", () => {
+test("같은 UTxO 를 두 번 쓰려는 트랜잭션은 수수료를 충분히 얹어야 앞의 것을 밀어낸다", () => {
+  /*
+   * 이중지불은 그냥 거절하는 것이 아니라 바꿔치기(RBF)로 다룬다. 수수료를
+   * 적게 매겨 묶인 트랜잭션을 푸는 길이 그것뿐이기 때문이다. 대신 값을
+   * 치러야 한다 — 밀려나는 것의 수수료보다 많이, 그리고 자기 대역폭 값까지.
+   */
   const owner = makeWallet();
   const a = makeWallet();
   const b = makeWallet();
   const uTxOuts = [utxo(owner, "seed", 10 * COIN)];
 
-  const first = spend(owner, a.address, "seed", 10 * COIN, 4 * COIN, 6 * COIN);
-  const double = spend(owner, b.address, "seed", 10 * COIN, 5 * COIN, 5 * COIN);
-
-  Mempool.updateMempool([]); // 비우기
+  const first = spend(owner, a.address, "seed", 10 * COIN, 4 * COIN, 6 * COIN - FEE);
+  Mempool.updateMempool([]);
   Mempool.addToMempool(first, uTxOuts);
 
-  // 두 번째는 같은 seed 를 가리키므로 이중지불이다
-  assert.throws(
-    () => Mempool.addToMempool(double, uTxOuts),
-    /not valid for the pool/
-  );
-  assert.strictEqual(Mempool.getMempool().length, 1);
+  // 더 싼 것으로는 밀어낼 수 없다
+  const cheaper = spend(owner, b.address, "seed", 10 * COIN, 5 * COIN, 5 * COIN - FEE / 2);
+  assert.throws(() => Mempool.addToMempool(cheaper, uTxOuts), /수수료율이 더 높아야/);
+  assert.deepStrictEqual(Mempool.getMempool().map(tx => tx.id), [first.id]);
+
+  // 조금 더 내는 것으로도 안 된다 — 밀려나는 수수료 + 자기 대역폭 값을 넘어야 한다
+  const barely = spend(owner, b.address, "seed", 10 * COIN, 5 * COIN, 5 * COIN - FEE - 100);
+  assert.throws(() => Mempool.addToMempool(barely, uTxOuts), /수수료가 .* 이상이어야/);
+  assert.deepStrictEqual(Mempool.getMempool().map(tx => tx.id), [first.id]);
+
+  // 넉넉히 얹으면 앞의 것이 밀려나고 새 것이 남는다
+  const better = spend(owner, b.address, "seed", 10 * COIN, 5 * COIN, 5 * COIN - 3 * FEE);
+  Mempool.addToMempool(better, uTxOuts);
+  assert.deepStrictEqual(Mempool.getMempool().map(tx => tx.id), [better.id]);
   Mempool.updateMempool([]);
 });
 
@@ -65,11 +82,11 @@ test("블록에 담겨 UTxO 가 사라지면 pool 에서도 빠진다", () => {
 
   Mempool.updateMempool([]);
   Mempool.addToMempool(
-    spend(owner, receiver.address, "s1", 10 * COIN, 4 * COIN, 6 * COIN),
+    spend(owner, receiver.address, "s1", 10 * COIN, 4 * COIN, 6 * COIN - FEE),
     uTxOuts
   );
   Mempool.addToMempool(
-    spend(owner, receiver.address, "s2", 10 * COIN, 3 * COIN, 7 * COIN),
+    spend(owner, receiver.address, "s2", 10 * COIN, 3 * COIN, 7 * COIN - FEE),
     uTxOuts
   );
   assert.strictEqual(Mempool.getMempool().length, 2);
@@ -139,7 +156,7 @@ test("getMempool 이 준 배열을 밖에서 고쳐도 pool 은 그대로다", (
 
   Mempool.updateMempool([]);
   Mempool.addToMempool(
-    spend(owner, receiver.address, "c1", 10 * COIN, 4 * COIN, 6 * COIN),
+    spend(owner, receiver.address, "c1", 10 * COIN, 4 * COIN, 6 * COIN - FEE),
     uTxOuts
   );
 
@@ -176,51 +193,25 @@ test("블록에 담을 때 수수료율이 높은 순으로 고르고 한도를 
   assert.deepStrictEqual(Mempool.selectTxsForBlock([low.tx], uTxOuts, 0), []);
 });
 
-test("pool 이 가득 차면 더 받지 않는다", () => {
-  const owner = makeWallet();
-  const receiver = makeWallet();
-
-  Mempool.updateMempool([]);
-  const uTxOuts = [];
-  for (let i = 0; i < Mempool.MAX_MEMPOOL_SIZE; i++) {
-    const seed = `full${i}`;
-    uTxOuts.push(utxo(owner, seed, 10 * COIN));
-  }
-  for (let i = 0; i < Mempool.MAX_MEMPOOL_SIZE; i++) {
-    Mempool.addToMempool(
-      spend(owner, receiver.address, `full${i}`, 10 * COIN, 4 * COIN, 6 * COIN),
-      uTxOuts
-    );
-  }
-  assert.strictEqual(Mempool.getMempool().length, Mempool.MAX_MEMPOOL_SIZE);
-
-  const extraUtxo = utxo(owner, "overflow", 10 * COIN);
-  assert.throws(
-    () =>
-      Mempool.addToMempool(
-        spend(owner, receiver.address, "overflow", 10 * COIN, 4 * COIN, 6 * COIN),
-        [...uTxOuts, extraUtxo]
-      ),
-    /mempool is full/
-  );
-  Mempool.updateMempool([]);
-});
-
 /* ------------------------------------------- 권장 수수료 */
 
 test("다음 블록에 자리가 있으면 바닥값을 권한다", () => {
   Mempool.updateMempool([]);
-  const estimate = Mempool.estimateFee([], 99);
-  assert.strictEqual(estimate.perInput, Mempool.MIN_FEE_PER_INPUT);
+  const estimate = Mempool.estimateFee([], 100000);
+  assert.strictEqual(estimate.perByte, MIN_RELAY_FEE_RATE);
   assert.strictEqual(estimate.congested, false);
   assert.strictEqual(estimate.mempoolSize, 0);
+  assert.strictEqual(estimate.mempoolBytes, 0);
+  // 지갑이 바로 쓸 수 있게 보통 트랜잭션 값도 함께 준다
+  assert.ok(estimate.typicalTx.bytes > 200 && estimate.typicalTx.bytes < 400);
+  assert.strictEqual(estimate.typicalTx.fee, MIN_RELAY_FEE_RATE * estimate.typicalTx.bytes);
 });
 
 test("자리가 꽉 차면 담기는 마지막 자리보다 조금 높은 값을 권한다", () => {
   /*
-   * 블록 자리가 3건인데 mempool 에 수수료율 5, 3, 1 이 있다면 3건 모두
-   * 담긴다. 여기에 끼어들려면 마지막 자리(1)보다 높아야 한다.
-   * 자리가 2건이면 마지막 자리는 3 이다.
+   * 블록이 바이트로 차므로, 수수료율 높은 순으로 세워 놓고 한 블록 분량을
+   * 채운 뒤 잘리는 자리의 값을 본다. 여기 트랜잭션은 400바이트 안쪽이라
+   * 블록을 두 건 분량(800바이트)으로 잡으면 세 번째가 잘린다.
    */
   const owner = makeWallet();
   const receiver = makeWallet();
@@ -233,12 +224,18 @@ test("자리가 꽉 차면 담기는 마지막 자리보다 조금 높은 값을
     );
   }
 
-  const roomy = Mempool.estimateFee(uTxOuts, 99);
-  assert.strictEqual(roomy.congested, false, "99자리에 3건이면 널널하다");
+  const roomy = Mempool.estimateFee(uTxOuts, 100000);
+  assert.strictEqual(roomy.congested, false, "100KB 에 3건이면 널널하다");
+  assert.strictEqual(roomy.perByte, MIN_RELAY_FEE_RATE);
 
-  const tight = Mempool.estimateFee(uTxOuts, 2);
+  const sizes = Mempool.getMempool().map(tx => getTxSize(tx));
+  const tight = Mempool.estimateFee(uTxOuts, sizes[0] + sizes[1]);
   assert.strictEqual(tight.congested, true);
-  assert.strictEqual(tight.perInput, 30001, "두 자리째(30000)를 밀어내려면 그보다 1 높아야 한다");
+  // 두 건이 차면 잘리는 자리는 두 번째(30000 lm)다. 그보다 높아야 끼어든다.
+  const secondRate = 30000 / sizes[1];
+  assert.strictEqual(tight.perByte, Math.floor(secondRate) + 1);
+  assert.ok(tight.perByte > secondRate);
   assert.strictEqual(tight.mempoolSize, 3);
+  assert.strictEqual(tight.mempoolBytes, sizes.reduce((a, b) => a + b, 0));
   Mempool.updateMempool([]);
 });

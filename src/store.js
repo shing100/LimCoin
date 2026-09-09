@@ -19,6 +19,7 @@ const fs = require("fs"),
 
 const BLOCKS_FILE = "blocks.jsonl";
 const MEMPOOL_FILE = "mempool.jsonl";
+const CHAINSTATE_FILE = "chainstate.json";
 
 // open() 을 부르기 전에는 아무것도 저장하지 않는다.
 // 테스트는 open() 을 부르지 않으므로 디스크를 건드리지 않는다.
@@ -26,6 +27,7 @@ let dir = null;
 
 const blocksPath = () => path.join(dir, BLOCKS_FILE);
 const mempoolPath = () => path.join(dir, MEMPOOL_FILE);
+const chainstatePath = () => path.join(dir, CHAINSTATE_FILE);
 
 // 노드마다 다른 디렉터리를 써야 한 대에서 여러 노드를 띄울 수 있다.
 // 망마다 다른 디렉터리를 써야 메인넷 체인 위에 테스트넷 블록이 쌓이는 일이 없다
@@ -122,10 +124,55 @@ const saveMempool = txs => {
   writeAtomically(mempoolPath(), txs);
 };
 
+/*
+ * chainstate — UTxOut 집합의 스냅샷.
+ *
+ * 예전에는 뜰 때마다 제네시스부터 모든 블록을 다시 검증했다. 서명 검증은
+ * 트랜잭션마다 하므로 체인 길이에 비례해 시간이 늘고, 만 블록쯤 되면
+ * 노드가 뜨는 데 몇 분이 걸린다. 이미 우리가 받아들여 디스크에 적어 둔
+ * 블록들인데 매번 다시 따지는 셈이다.
+ *
+ * 비트코인 코어의 chainstate 와 같은 생각이다. 끝 블록의 해시를 함께
+ * 적어 두고, 뜰 때 저장된 체인의 끝과 맞는지 본다. 어긋나면(파일을
+ * 손댔거나 도중에 죽었거나) 그냥 버리고 예전처럼 전부 재생한다 —
+ * 틀린 UTxOut 집합을 들고 가느니 느리게 가는 편이 낫다.
+ *
+ * 한 파일에 통째로 쓰고 rename 한다.
+ */
+const loadChainstate = () => {
+  if (!isOpen() || !fs.existsSync(chainstatePath())) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(chainstatePath(), "utf8"));
+  } catch (e) {
+    console.log("chainstate 파일이 깨져 있습니다. 체인을 전부 재생합니다.");
+    return null;
+  }
+};
+
+const saveChainstate = state => {
+  if (!isOpen()) {
+    return;
+  }
+  const tmp = chainstatePath() + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(state));
+  fs.renameSync(tmp, chainstatePath());
+};
+
+const dropChainstate = () => {
+  if (isOpen() && fs.existsSync(chainstatePath())) {
+    fs.unlinkSync(chainstatePath());
+  }
+};
+
 module.exports = {
   open,
   close,
   isOpen,
+  loadChainstate,
+  saveChainstate,
+  dropChainstate,
   loadBlocks,
   appendBlock,
   writeBlocks,

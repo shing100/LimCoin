@@ -8,6 +8,8 @@
 - **이 체인은 아직 공개 해시레이트가 없다.** 지금 난이도는 노트북 한 대로
   체인을 다시 쓸 수 있는 수준이다. 아래 확인 수는 "해시레이트가 충분히 분산된
   뒤"를 전제로 한 값이고, 그 전에는 어떤 확인 수도 안전하지 않다.
+  노드는 우리 끝에서 100블록보다 깊이 되감으라는 체인을 거부하지만
+  (`LIMCOIN_MAX_REORG_DEPTH`), 그것은 임시 방편이지 해시레이트의 대체물이 아니다.
 - 노드는 단일 구현(Node.js)이다. 다른 언어 구현이 없으므로 합의 버그가 곧
   체인 전체의 버그다.
 - 테스트넷이 있다. 통합은 테스트넷에서 끝까지 해 보고 메인넷으로 가라.
@@ -136,6 +138,64 @@ tx.txIns[0].signature = Keys.sign(priv, tx.id);
 - 난이도는 블록마다 조정된다(LWMA). 해시레이트가 갑자기 빠져도 블록 시간은
   몇 분 안에 목표(10초)로 돌아온다. `GET /info` 의 `difficulty` 는 사람이 읽는
   값(바닥 = 1), `bits`/`target` 이 합의값이다.
+
+## 5.5 콜드월렛과 수수료
+
+**다중서명 콜드월렛.** 출금 키를 한 곳에 두지 않으려면 2-of-3 주소를 쓴다.
+
+```bash
+# 참여자마다 공개키를 낸다 (노드 지갑을 쓰면 GET /me/publickeys)
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"type":"multisig","m":2,"publicKeys":["04…","04…","04…"]}' \
+  localhost:3000/script/address
+# -> { address: "M…", redeemScript: "52…ae", asm: "OP_2 … OP_3 OP_CHECKMULTISIG" }
+```
+
+`redeemScript` 를 잃으면 그 주소의 코인을 영영 쓸 수 없다. 주소와 함께
+보관할 것. 출금은 이렇게 만든다.
+
+```bash
+# 1) 쓸 출력을 고르고 서명하지 않은 트랜잭션을 만든다 (키를 쓰지 않는다)
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"inputs":[{"txOutId":"…","txOutIndex":0}],"outputs":[{"address":"L…","amount":100000000}]}' \
+  localhost:3000/transactions/build
+# -> { tx, signingHash, fee }
+# 2) 참여자마다 signingHash 에 서명한다 (오프라인에서, 또는 POST /me/sign)
+# 3) 서명을 공개키 순서대로 unlock 에 넣고 redeemScript 를 실어 보낸다
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"id":"…","txIns":[{"txOutId":"…","txOutIndex":0,"signature":"",
+       "redeemScript":"52…ae","unlock":["<서명1>","<서명2>"]}],
+       "txOuts":[…],"lockTime":0}' \
+  localhost:3000/transactions/raw
+```
+
+서명 순서가 공개키 순서와 다르면 거부된다. 타임락(`timelock`)과
+HTLC(`htlc`) 주소도 같은 방식으로 만든다 — 형식은 [SPEC 3.6](SPEC.md).
+
+**수수료.** 바이트당으로 매긴다.
+
+```bash
+curl localhost:3000/fees
+# { "perByte": 4, "typicalTx": { "bytes": 269, "fee": 1076 }, "congested": false, … }
+```
+
+- `POST /transactions` 에 `feeRate`(lm/byte)를 주면 크기에서 값을 뽑는다.
+  `fee` 를 직접 줘도 된다. 둘 다 없으면 지금 권장값을 쓴다.
+- 최소 릴레이 수수료는 4 lm/byte 다. 그보다 낮으면 mempool 이 받지 않는다.
+- 묶여 버린 출금은 같은 출력을 쓰는 트랜잭션을 수수료를 올려 다시 보내면
+  바꿔치기된다(RBF). 밀려나는 수수료 합에 자기 대역폭 값(크기 × 4)까지
+  얹어야 받아 준다.
+
+**핫월렛 잠그기.** 노드에 지갑을 두어야 한다면 파일에 암호를 건다.
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"passphrase":"…"}' localhost:3000/me/passphrase
+# 뜰 때 LIMCOIN_WALLET_PASSPHRASE 로 자동으로 풀거나, POST /me/unlock 으로 푼다
+```
+
+잠긴 동안에는 지갑 엔드포인트가 `423 Locked` 를 돌려준다. 가장 안전한 것은
+여전히 `LIMCOIN_WALLET=off` 로 노드에 키를 두지 않는 것이다.
 
 ## 6. 운영
 

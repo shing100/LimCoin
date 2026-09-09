@@ -20,7 +20,9 @@ const {
   getTxProof, getNewestBlock, initChain, getBlockByHash, findTx
 } = Blockchain;
 const { getTxFee } = Transactions;
-const { indexByOutpoint, indexByAddress } = require("./utxo");
+const { indexByOutpoint, indexByAddress, keyOf } = require("./utxo");
+const Address = require("./address");
+const Script = require("./script");
 const { startP2PServer, setPublicUrl, connectToPeers, disconnectPeer, getPeers, getKnownAddresses } = P2P;
 const { initWallet, getReceiveAddress, getNewAddress, getAddresses, getBalance, getMnemonic, restoreFromMnemonic, GAP_LIMIT } = Wallet;
 const { version: VERSION } = require("../package.json");
@@ -29,7 +31,8 @@ const AddressIndexApi = require("./addressIndex");
 const { getMempool } = Mempool;
 const {
   isAddressValid, getBlockSubsidy, getTotalSupply,
-  HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK, COINBASE_MATURITY
+  HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK, MAX_BLOCK_BYTES,
+  MIN_RELAY_FEE_RATE, COINBASE_MATURITY
 } = Transactions;
 const { COIN, DECIMALS } = require("./units");
 
@@ -125,6 +128,14 @@ const requireWallet = (req, res, next) => {
     res.status(503).send("이 노드는 지갑 없이 돕니다 (LIMCOIN_WALLET=off). 외부에서 서명해 POST /transactions/raw 로 보내세요.");
     return;
   }
+  /*
+   * 암호가 걸린 지갑은 풀기 전에는 아무것도 못 한다 — 주소마저 씨앗에서
+   * 나오기 때문이다. 423 Locked 로 그렇다고 알려 준다.
+   */
+  if (Wallet.isLocked()) {
+    res.status(423).send("지갑이 잠겨 있습니다. POST /me/unlock 으로 암호를 주세요.");
+    return;
+  }
   next();
 };
 
@@ -179,6 +190,20 @@ app.route("/blocks").get((req, res) => {
  * connectToPeers 가 본다(ws:// 또는 wss://).
  */
 // 아는 주소 전부 (아직 붙지 않은 것 포함). 피어에게 배운 것이 여기 쌓인다.
+/*
+ * 규칙을 어겨 한동안 받지 않기로 한 주소들.
+ *
+ * 목록은 공개다(누가 막혔는지는 비밀이 아니다). 푸는 것은 지갑 토큰을
+ * 요구한다 — 아무나 풀 수 있으면 밴이 의미가 없다.
+ */
+app.route("/peers/banned")
+  .get((req, res) => {
+    res.send(P2P.getBanned());
+  })
+  .delete(requireWalletAuth, (req, res) => {
+    res.send({ cleared: P2P.clearBans() });
+  });
+
 app.get("/peers/known", (req, res) => {
   res.send(getKnownAddresses());
 });
@@ -259,6 +284,67 @@ app.get("/me/addresses", requireWalletAuth, requireWallet, (req, res) => {
  * 그건 UTxOut 집합을 가진 노드만 할 수 있다. 주소 색인이 블록에 대해
  * 하는 일을 mempool 에 대해 하는 셈이라, 응답 모양도 색인과 맞춘다.
  */
+/* ------------------------------------------- 지갑 잠그기
+ *
+ * 지갑 파일에는 니모닉이 들어간다. 파일 권한(0600)은 같은 기계의 다른
+ * 사용자를 막을 뿐, 백업이나 훔쳐 간 디스크에는 소용이 없다.
+ * scrypt + AES-256-GCM 으로 파일 자체를 잠근다.
+ */
+app.get("/me/lockstatus", requireWalletAuth, (req, res) => {
+  res.send({ encrypted: Wallet.isEncrypted(), locked: Wallet.isLocked() });
+});
+
+// 암호 걸기·바꾸기. 빈 값이면 푼다(평문으로 되돌린다).
+app.post("/me/passphrase", requireWalletAuth, requireWallet, (req, res) => {
+  try {
+    const { passphrase } = req.body || {};
+    res.send(Wallet.setPassphrase(passphrase === undefined ? "" : passphrase));
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
+});
+
+// 잠긴 지갑 풀기. requireWallet 을 걸지 않는다 — 잠겨 있어야 부르는 것이므로.
+app.post("/me/unlock", requireWalletAuth, (req, res) => {
+  try {
+    Wallet.unlock((req.body || {}).passphrase);
+    res.send({ locked: false });
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
+});
+
+app.post("/me/lock", requireWalletAuth, (req, res) => {
+  Wallet.lock();
+  res.send({ locked: Wallet.isLocked() });
+});
+
+/*
+ * 이 지갑의 공개키들. 다중서명 주소를 만들려면 참여자끼리 공개키를 주고받아야
+ * 한다. 공개키는 비밀이 아니다 — 주소를 만들고 서명을 확인하는 데만 쓴다.
+ */
+app.get("/me/publickeys", requireWalletAuth, requireWallet, (req, res) => {
+  res.send({ publicKeys: Wallet.getPublicKeys() });
+});
+
+/*
+ * txid 에 서명한다 (다중서명·HTLC 처럼 해제 데이터를 사람이 짜 맞출 때).
+ *
+ * 노드는 어떤 갈래로 풀지 모르므로 서명만 만들어 준다. 받은 서명을 unlock
+ * 배열에 순서대로 넣어 POST /transactions/raw 로 보내면 된다.
+ */
+app.post("/me/sign", requireWalletAuth, requireWallet, (req, res) => {
+  try {
+    const { txId, tx, publicKey } = req.body || {};
+    // tx 를 통째로 주면 id 를 다시 계산해 준다 — 남이 보낸 id 를 믿지 않는다
+    const message = tx !== undefined ? Transactions.getTxId(tx) : txId;
+    const signed = Wallet.signMessage(message, publicKey);
+    res.send({ txId: message, ...signed });
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
+});
+
 app.get("/me/pending", requireWalletAuth, requireWallet, (req, res) => {
   const mine = new Set(getAddresses());
   const mempool = getMempool();
@@ -388,6 +474,7 @@ app.get("/health", (req, res) => {
     peers: getPeers().length,
     mempool: getMempool().length,
     walletEnabled: Wallet.isEnabled(),
+    walletLocked: Wallet.isEnabled() && Wallet.isLocked(),
     uptime: Math.round((Date.now() - STARTED_AT) / 1000)
   });
 });
@@ -456,18 +543,142 @@ app.post("/transactions/raw", (req, res) => {
   }
 });
 
+/* ------------------------------------------- 스크립트 (다중서명·타임락·HTLC)
+ *
+ * 주소를 만드는 것은 순수 계산이라 지갑도 키도 필요 없다. 공개로 둔다 —
+ * 하드웨어 지갑이나 다른 언어 지갑도 같은 주소를 스스로 만들 수 있어야 한다.
+ */
+const buildRedeemScript = body => {
+  if (body === null || typeof body !== "object") {
+    throw Error("본문이 없습니다");
+  }
+  switch (body.type) {
+    case "multisig":
+      return Script.multisig(body.m, body.publicKeys);
+    case "timelock":
+      return Script.timeLocked(body.lockTime, body.publicKey);
+    case "htlc":
+      return Script.hashTimeLocked(body);
+    case "raw":
+      if (typeof body.redeemScript !== "string") {
+        throw Error("redeemScript 가 필요합니다");
+      }
+      Script.parse(body.redeemScript); // 형식 확인
+      return body.redeemScript;
+    default:
+      throw Error('type 은 multisig, timelock, htlc, raw 중 하나여야 합니다');
+  }
+};
+
+app.post("/script/address", (req, res) => {
+  try {
+    const redeemScript = buildRedeemScript(req.body);
+    const scriptVersion = Params.current().scriptAddressVersion;
+    res.send({
+      address: Address.addressFromScript(redeemScript, scriptVersion),
+      redeemScript,
+      asm: Script.toAsm(redeemScript),
+      script: Script.describe(redeemScript)
+    });
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
+});
+
+// 남이 준 redeemScript 가 무엇인지 읽어 본다 (보내기 전에 확인하는 용도)
+app.post("/script/decode", (req, res) => {
+  try {
+    const { redeemScript } = req.body || {};
+    if (typeof redeemScript !== "string") {
+      throw Error("redeemScript 가 필요합니다");
+    }
+    res.send({
+      address: Address.addressFromScript(redeemScript, Params.current().scriptAddressVersion),
+      asm: Script.toAsm(redeemScript),
+      script: Script.describe(redeemScript)
+    });
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
+});
+
+/*
+ * 서명하지 않은 트랜잭션을 만든다.
+ *
+ * 다중서명·타임락 출력을 쓰려면 여러 사람이 같은 트랜잭션에 차례로 서명해야
+ * 한다. 그 트랜잭션을 손으로 짜 맞추지 않아도 되게 해 준다. 키는 쓰지 않으므로
+ * 지갑이 꺼진 노드에서도 된다. 서명은 POST /me/sign 이나 바깥에서.
+ */
+app.post("/transactions/build", (req, res) => {
+  try {
+    const { inputs, outputs, lockTime = 0 } = req.body || {};
+    if (!Array.isArray(inputs) || inputs.length === 0 || !Array.isArray(outputs) || outputs.length === 0) {
+      throw Error("inputs 와 outputs 가 필요합니다");
+    }
+    if (!Number.isInteger(lockTime) || lockTime < 0 || lockTime > 0xffffffff) {
+      throw Error("lockTime 은 0 이상의 uint32 여야 합니다");
+    }
+    const unspent = indexByOutpoint(getUTxOutList());
+    let inputTotal = 0;
+    const txIns = inputs.map(input => {
+      const found = unspent.get(keyOf(input.txOutId, input.txOutIndex));
+      if (found === undefined) {
+        throw Error(`쓸 수 없는 입력입니다: ${input.txOutId}:${input.txOutIndex}`);
+      }
+      inputTotal += found.amount;
+      return { txOutId: input.txOutId, txOutIndex: input.txOutIndex, signature: "" };
+    });
+    let outputTotal = 0;
+    const txOuts = outputs.map(output => {
+      if (!Transactions.isAddressValid(output.address)) {
+        throw Error(`이 망의 주소가 아닙니다: ${output.address}`);
+      }
+      if (!Number.isInteger(output.amount) || output.amount <= 0) {
+        throw Error("amount 는 최소 단위(lm) 양의 정수여야 합니다");
+      }
+      outputTotal += output.amount;
+      return { address: output.address, amount: output.amount };
+    });
+    if (outputTotal > inputTotal) {
+      throw Error(`출력 합(${outputTotal})이 입력 합(${inputTotal})보다 큽니다`);
+    }
+    const tx = { txIns, txOuts, lockTime, id: "" };
+    tx.id = Transactions.getTxId(tx);
+    res.send({
+      tx,
+      // 서명은 이 값에 한다. 해제 데이터는 id 에 들어가지 않으므로 서명 뒤에도 그대로다.
+      signingHash: tx.id,
+      fee: inputTotal - outputTotal,
+      inputTotal,
+      outputTotal
+    });
+  } catch (e) {
+    res.status(400).send(e.message);
+  }
+});
+
 app.route("/transactions")
   .get((req, res) => {
     res.send(getMempool());
   })
   .post(requireWalletAuth, requireWallet, (req, res) => {
     try {
-      const { body: { address, amount, fee = 0 } } = req;
+      const { body: { address, amount, fee, feeRate } } = req;
       if (address === undefined || amount === undefined) {
         throw Error("Please specify an address and an amount");
       }
-      // amount 와 fee 는 최소 단위(lm) 정수다. 1 LIM = 100,000,000 lm.
-      res.send(sendTx(address, amount, fee));
+      /*
+       * amount 와 fee 는 최소 단위(lm) 정수다. 1 LIM = 100,000,000 lm.
+       *
+       * fee 를 직접 주면 그대로 쓰고, feeRate(lm/byte)를 주면 크기에서
+       * 뽑는다. 둘 다 없으면 지금 mempool 이 권하는 값을 쓴다 — 예전에는
+       * 아무것도 안 주면 수수료 0 이라 그대로 묶였다.
+       */
+      const rate =
+        feeRate === undefined && fee === undefined
+          ? Mempool.estimateFee(getUTxOutList(), MAX_BLOCK_BYTES).perByte
+          : feeRate || 0;
+      res.send(sendTx(address, amount, fee || 0, rate));
     } catch (e) {
       res.status(400).send(e.message);
     }
@@ -604,16 +815,21 @@ app.get("/info", (req, res) => {
     nextHalvingAtHeight:
       (Math.floor(nextIndex / HALVING_INTERVAL) + 1) * HALVING_INTERVAL,
     maxTxsPerBlock: MAX_TXS_PER_BLOCK,
+    maxBlockBytes: MAX_BLOCK_BYTES,
+    minRelayFeeRate: MIN_RELAY_FEE_RATE,
     coinbaseMaturity: COINBASE_MATURITY,
     indexedAddresses: AddressIndex.getIndexedAddressCount(),
     // 지갑이 기본값으로 쓸 입력당 권장 수수료
-    recommendedFeePerInput: Mempool.estimateFee(getUTxOutList(), MAX_TXS_PER_BLOCK - 1).perInput,
+    recommendedFeePerByte: Mempool.estimateFee(getUTxOutList(), MAX_BLOCK_BYTES).perByte,
+    mempoolBytes: Mempool.poolBytes(),
     // 어느 망의 노드인지. 주소 형식과 제네시스가 이것으로 갈린다.
     network: Params.current().name,
     addressVersion: Params.current().addressVersion,
+    scriptAddressVersion: Params.current().scriptAddressVersion,
     genesisHash: getBlockChain()[0].hash,
     chainWork: chainWork(getBlockChain()).toString(),
     walletEnabled: Wallet.isEnabled(),
+    walletLocked: Wallet.isEnabled() && Wallet.isLocked(),
     version: VERSION
   });
 });
@@ -623,7 +839,7 @@ app.get("/info", (req, res) => {
  * 있으면 바닥값, 넘치면 담기는 마지막 자리보다 조금 높은 값.
  */
 app.get("/fees", (req, res) => {
-  res.send(Mempool.estimateFee(getUTxOutList(), MAX_TXS_PER_BLOCK - 1));
+  res.send(Mempool.estimateFee(getUTxOutList(), MAX_BLOCK_BYTES));
 });
 
 app.get("/address/:address", (req, res) => {
@@ -759,6 +975,8 @@ const shutdown = async signal => {
   try {
     await Miner.stop();
     persistMempool();
+    // 다음에 뜰 때 체인을 전부 재생하지 않도록 UTxOut 집합을 남긴다
+    Blockchain.persistChainstate();
   } catch (e) {
     console.log(`종료 정리 중 문제가 있었습니다: ${e.message}`);
   }

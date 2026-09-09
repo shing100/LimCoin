@@ -1,10 +1,10 @@
 {
   "version": 1,
   "index": 0,
-  "hash": "1f10a168c53e7dc4a7c91a0c407dfc8c480ad4ad9c326de63538f94955cc743e",
+  "hash": "f61d780d04e2827c94dfbf876709966b63490496a0ecd34e0318554e1531a8d4",
   "previousHash": "0000000000000000000000000000000000000000000000000000000000000000",
   "timestamp": 1788853057,
-  "merkleRoot": "0548843f64bdfb26625537eec7ac828ea186eeb750f71c534ab82493e6b621c6",
+  "merkleRoot": "bd20e947112f7a50da999f6be84fe56c17d15f1c9c7bc10f342ecf38acfc5863",
   "data": [
     {
       "txIns": [
@@ -20,7 +20,7 @@
           "amount": 1000000000
         }
       ],
-      "id": "0548843f64bdfb26625537eec7ac828ea186eeb750f71c534ab82493e6b621c6"
+      "id": "bd20e947112f7a50da999f6be84fe56c17d15f1c9c7bc10f342ecf38acfc5863"
     }
   ],
   "bits": 520224767,
