@@ -138,6 +138,9 @@ const getTransactions = (address, limit = 50, offset = 0) => {
   };
 };
 
+// 개수만 필요할 때. getTransactions 는 목록을 뒤집느라 배열을 통째로 복사한다.
+const getTransactionCount = address => (byAddress.get(address) || []).length;
+
 const hasAddress = address => byAddress.has(address);
 
 const getIndexedAddressCount = () => byAddress.size;
@@ -148,6 +151,7 @@ module.exports = {
   rebuild,
   rollbackTo,
   getTransactions,
+  getTransactionCount,
   hasAddress,
   getIndexedAddressCount
 };

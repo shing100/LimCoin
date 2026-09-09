@@ -4,7 +4,7 @@
 
 ```bash
 yarn install
-yarn test      # 294건
+yarn test      # 304건
 yarn lint
 ```
 

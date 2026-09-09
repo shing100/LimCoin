@@ -88,7 +88,16 @@ test("getblock 은 verbosity 0/1/2 를 구분한다", () => {
   assert.strictEqual(one.nTx, tip.data.length);
   assert.deepStrictEqual(one.tx, tip.data.map(t => t.id), "1 이면 id 목록이다");
   assert.strictEqual(one.difficulty, Target.difficultyOf(tip.bits));
+  assert.strictEqual(one.bits.length, 8, "bits 는 8자리 hex 다");
+  assert.strictEqual(parseInt(one.bits, 16), tip.bits);
+  assert.strictEqual(one.versionHex.length, 8);
   assert.strictEqual(typeof one.chainwork, "string");
+  // 무게는 높이별 누적이다 — 앞 블록보다 무거워야 한다
+  const parent = rpc("getblock", [tip.previousHash, 1]);
+  assert.ok(BigInt(`0x${one.chainwork}`) > BigInt(`0x${parent.chainwork}`), "팁이 부모보다 무겁다");
+  assert.strictEqual(one.size, one.strippedsize, "우리에겐 witness 가 없다");
+  assert.strictEqual(one.size, one.weight);
+  assert.strictEqual(one.size, raw.length / 2, "size 는 raw 바이트 수다");
 
   const two = rpc("getblock", [tip.hash, 2]);
   assert.strictEqual(two.tx[0].txid, tip.data[0].id, "2 면 트랜잭션 객체다");

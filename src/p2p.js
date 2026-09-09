@@ -11,7 +11,7 @@ const NETWORK_MAGIC = Params.current().magic;
 
 const {
   getNewestBlock, isBlockStructureValid, replaceChain, getBlockChain,
-  addBlockToChain, handleIncomingTxs, isHeaderValid, headerOf, chainWork
+  addBlockToChain, handleIncomingTxs, isHeaderValid, headerOf, tipWork, workUpTo
 } = Blockchain;
 
 const { getMempool } = Mempool;
@@ -156,7 +156,7 @@ const blockchainResponse = (data) => {
     type: BLOCKCHAIN_RESPONSE,
     data,
     // BigInt 는 JSON 에 못 담으므로 10진 문자열로
-    work: chainWork(getBlockChain()).toString()
+    work: tipWork().toString()
   }
 }
 
@@ -637,7 +637,7 @@ const handleBlockchainResponse = (ws, receivedBlocks, claimedWork) => {
    */
   const heavier =
     typeof claimedWork === "string" && /^\d{1,80}$/.test(claimedWork)
-      ? BigInt(claimedWork) > chainWork(getBlockChain())
+      ? BigInt(claimedWork) > tipWork()
       : latestBlockReceived.index > newestBlock.index;
   if (heavier) {
     requestHeaders(ws);
@@ -796,7 +796,7 @@ const handleHeadersResponse = (ws, data) => {
     const chain = getBlockChain();
     sync.forkParent = forkParent;
     sync.window = chain.slice(Math.max(0, forkParent + 1 - HEADER_WINDOW), forkParent + 1);
-    sync.headerWork = chainWork(chain.slice(0, forkParent + 1));
+    sync.headerWork = workUpTo(forkParent);
   }
 
   for (const header of headers) {
@@ -832,7 +832,7 @@ const finishHeaders = ws => {
     return;
   }
   const theirs = sync.headerWork;
-  const ours = chainWork(getBlockChain());
+  const ours = tipWork();
   const theirHeight = sync.forkParent + sync.headerHashes.length;
   if (theirs <= ours) {
     resetSync(

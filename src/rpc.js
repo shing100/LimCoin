@@ -145,6 +145,8 @@ const confirmationsFor = height =>
 const blockToJson = (block, verbosity) => {
   const chain = Blockchain.getBlockChain();
   const next = chain[block.index + 1];
+  // 한 번만 직렬화한다 — size/strippedsize/weight 가 같은 값을 쓴다
+  const rawBytes = S.encodeBlock(block).length / 2;
   const base = {
     hash: block.hash,
     confirmations: confirmationsFor(block.index),
@@ -153,17 +155,21 @@ const blockToJson = (block, verbosity) => {
     versionHex: block.version.toString(16).padStart(8, "0"),
     merkleroot: block.merkleRoot,
     time: block.timestamp,
-    mediantime: Blockchain.medianTimePast(chain.slice(0, block.index + 1)),
+    // MTP 는 직전 11블록만 본다. 앞부분을 통째로 넘기면 높이만큼 복사가 든다.
+    mediantime: Blockchain.medianTimePast(
+      chain.slice(Math.max(0, block.index + 1 - Blockchain.MEDIAN_TIME_SPAN), block.index + 1)
+    ),
     nonce: block.nonce,
-    bits: block.bits.toString(16),
+    // 8자리로 채운다 — 고정 폭으로 읽는 도구가 있다 (비트코인도 8자리다)
+    bits: (block.bits >>> 0).toString(16).padStart(8, "0"),
     difficulty: Target.difficultyOf(block.bits),
-    chainwork: Blockchain.chainWork(chain.slice(0, block.index + 1)).toString(16),
+    chainwork: Blockchain.workUpTo(block.index).toString(16),
     nTx: block.data.length,
     previousblockhash: block.index === 0 ? undefined : block.previousHash,
     nextblockhash: next ? next.hash : undefined,
-    size: S.encodeBlock(block).length / 2,
-    strippedsize: S.encodeBlock(block).length / 2,
-    weight: S.encodeBlock(block).length / 2
+    size: rawBytes,
+    strippedsize: rawBytes,
+    weight: rawBytes
   };
   if (verbosity >= 2) {
     return {
@@ -275,7 +281,7 @@ define("getblockchaininfo", [], () => {
     mediantime: Blockchain.medianTimePast(chain),
     verificationprogress: 1,
     initialblockdownload: false,
-    chainwork: Blockchain.chainWork(chain).toString(16),
+    chainwork: Blockchain.tipWork().toString(16),
     pruned: false,
     warnings: ""
   };
@@ -477,14 +483,24 @@ define(
   [],
   () => {
     requireUnlocked();
+    const mine = new Set(Wallet.getAddresses());
+    // 아직 블록에 안 담긴 내 앞으로의 출력 (mempool 것)
+    const unconfirmed = Mempool.getSpendableUTxOuts(Blockchain.getUTxOutList())
+      .filter(uTxOut => uTxOut.blockIndex === null && mine.has(uTxOut.address))
+      .reduce((sum, uTxOut) => sum + uTxOut.amount, 0);
     return {
       walletname: "",
       walletversion: 3,
       balance: toLim(Blockchain.getSpendableBalance()),
-      unconfirmed_balance: 0,
+      unconfirmed_balance: toLim(unconfirmed),
       immature_balance: toLim(Blockchain.getImmatureBalance()),
-      txcount: AddressIndex.getIndexedAddressCount(),
-      keypoolsize: Wallet.getAddresses().length,
+      // 이 지갑의 트랜잭션 수. 예전에는 노드 전체의 색인된 주소 수를 줬다 —
+      // 이름과 전혀 다른 값이라, 읽는 쪽이 그대로 믿으면 틀린다.
+      txcount: [...mine].reduce(
+        (total, address) => total + AddressIndex.getTransactionCount(address),
+        0
+      ),
+      keypoolsize: mine.size,
       paytxfee: 0,
       encrypted: Wallet.isEncrypted(),
       unlocked: !Wallet.isLocked()
@@ -536,15 +552,34 @@ define(
   { wallet: true }
 );
 
+/*
+ * listunspent(minconf, maxconf, addresses)
+ *
+ * 세 인자를 다 받는다. 예전에는 minconf 만 보고 나머지를 조용히 버렸는데,
+ * `listunspent 1 9999999 ["주소"]` 처럼 부르는 것이 흔하다 — 그러면 그 주소
+ * 것만 달라고 한 요청에 지갑 전체를 돌려주게 되고, 받는 쪽은 남의 출력을
+ * 그 주소 몫으로 센다. 무시하는 쪽이 더 많이 주는 방향이라 더 나쁘다.
+ */
 define(
   "listunspent",
-  ["minconf"],
+  ["minconf", "maxconf", "addresses"],
   params => {
     requireUnlocked();
-    const [minconf = 1] = argsOf(params, ["minconf"]);
+    const [minconf = 1, maxconf = 9999999, addresses] = argsOf(params, [
+      "minconf",
+      "maxconf",
+      "addresses"
+    ]);
+    const low = Number.isInteger(minconf) ? minconf : 1;
+    const high = Number.isInteger(maxconf) ? maxconf : 9999999;
+    if (addresses !== undefined && addresses !== null && !Array.isArray(addresses)) {
+      fail(ERROR.TYPE, "addresses 는 주소 배열이어야 합니다");
+    }
     const mine = new Set(Wallet.getAddresses());
+    // 주소를 줬으면 그 안에서만. 내 것이 아닌 주소를 물으면 빈 목록이 맞다.
+    const wanted = Array.isArray(addresses) ? new Set(addresses.filter(a => mine.has(a))) : mine;
     return Blockchain.getUTxOutList()
-      .filter(uTxOut => mine.has(uTxOut.address))
+      .filter(uTxOut => wanted.has(uTxOut.address))
       .map(uTxOut => ({
         txid: uTxOut.txOutId,
         vout: uTxOut.txOutIndex,
@@ -555,7 +590,7 @@ define(
         solvable: true,
         safe: true
       }))
-      .filter(entry => entry.confirmations >= (Number.isInteger(minconf) ? minconf : 1));
+      .filter(entry => entry.confirmations >= low && entry.confirmations <= high);
   },
   { wallet: true }
 );
@@ -566,6 +601,9 @@ define(
   params => {
     requireUnlocked();
     const [, count = 10, skip = 0] = argsOf(params, ["label", "count", "skip"]);
+    if (!Number.isInteger(count) || count < 0 || !Number.isInteger(skip) || skip < 0) {
+      fail(ERROR.INVALID_PARAMETER, "count 와 skip 은 0 이상의 정수여야 합니다");
+    }
     const rows = [];
     for (const address of Wallet.getAddresses()) {
       const { transactions } = AddressIndex.getTransactions(address, 1000, 0);
@@ -587,15 +625,48 @@ define(
   { wallet: true }
 );
 
+/*
+ * walletpassphrase(passphrase, timeout)
+ *
+ * timeout 초 뒤에 스스로 다시 잠근다. 예전에는 이 인자를 받기만 하고 버려서,
+ * `walletpassphrase(pw, 60)` 을 부른 쪽은 1분 뒤 잠긴 줄 알지만 지갑은 계속
+ * 열려 있었다. 잠금은 지키는 쪽으로 틀려야 한다.
+ */
+const MAX_UNLOCK_SECONDS = 24 * 60 * 60;
+let relockTimer = null;
+
+const cancelRelock = () => {
+  if (relockTimer !== null) {
+    clearTimeout(relockTimer);
+    relockTimer = null;
+  }
+};
+
 define(
   "walletpassphrase",
-  ["passphrase"],
+  ["passphrase", "timeout"],
   params => {
-    const [passphrase] = argsOf(params, ["passphrase", "timeout"]);
+    const [passphrase, timeout] = argsOf(params, ["passphrase", "timeout"]);
+    if (timeout !== undefined && (!Number.isInteger(timeout) || timeout <= 0)) {
+      fail(ERROR.INVALID_PARAMETER, "timeout 은 양의 정수(초)여야 합니다");
+    }
     try {
       Wallet.unlock(passphrase);
     } catch (e) {
       fail(ERROR.WALLET, e.message);
+    }
+    cancelRelock();
+    if (timeout !== undefined) {
+      const seconds = Math.min(timeout, MAX_UNLOCK_SECONDS);
+      relockTimer = setTimeout(() => {
+        relockTimer = null;
+        Wallet.lock();
+        console.log(`지갑을 다시 잠갔습니다 (walletpassphrase timeout ${seconds}초)`);
+      }, seconds * 1000);
+      // 이 타이머 때문에 노드가 안 꺼지면 안 된다
+      if (typeof relockTimer.unref === "function") {
+        relockTimer.unref();
+      }
     }
     return null;
   },
@@ -606,6 +677,7 @@ define(
   "walletlock",
   [],
   () => {
+    cancelRelock();
     Wallet.lock();
     return null;
   },

@@ -885,6 +885,40 @@ const isChainValid = (candidateChain) => {
 // 헤더만 있어도 셀 수 있다 — 동기화 때 블록을 받기 전에 비교하는 데 쓴다.
 const chainWork = anyBlockchain =>
   anyBlockchain.reduce((sum, block) => sum + Target.workOf(block.bits), 0n);
+
+/*
+ * 우리 체인의 누적 일한 양 — 높이별로 들고 있는다.
+ *
+ * chainWork 는 배열을 통째로 훑는다. 그런데 이 값을 묻는 자리가 죄다 뜨거운
+ * 길목이다: 새 블록을 알릴 때마다(P2P), /info 와 /metrics 를 긁을 때마다,
+ * getblock 을 부를 때마다. 10만 블록이면 한 번에 30ms 씩 들고, 거래소가
+ * 블록을 하나씩 훑으며 getblock 을 부르면 그게 제곱이 된다.
+ *
+ * 뒤에 붙는 블록은 이어서 채우고, 체인이 갈리면 갈라진 지점부터 버린다.
+ * (앞부분은 두 체인이 같은 블록이므로 다시 셀 필요가 없다.)
+ */
+let cumulativeWork = [];
+
+// height 부터는 다른 블록이 됐다 — 그 뒤 캐시를 버린다
+const dropWorkFrom = height => {
+  if (cumulativeWork.length > height) {
+    cumulativeWork.length = Math.max(0, height);
+  }
+};
+
+// 0..height 까지 우리 체인이 한 일. height 가 팁보다 크면 팁까지.
+const workUpTo = height => {
+  const last = Math.min(height, blockchain.length - 1);
+  if (last < 0) {
+    return 0n;
+  }
+  for (let i = cumulativeWork.length; i <= last; i++) {
+    cumulativeWork[i] = (i === 0 ? 0n : cumulativeWork[i - 1]) + Target.workOf(blockchain[i].bits);
+  }
+  return cumulativeWork[last];
+};
+
+const tipWork = () => workUpTo(blockchain.length - 1);
 // 블록체인 재배치
 const replaceChain = candidateChain => {
   const validated = isChainValid(candidateChain);
@@ -971,6 +1005,7 @@ const replaceChain = candidateChain => {
    * 데이터를 둔 이유가 사라진다. 새 블록만 감싼다.
    */
   blockchain = validated.chain.slice(0, common).concat(toHeaderChain(appended, common));
+  dropWorkFrom(common);
   uTxOuts = validated.uTxOuts;
   undoLog = validated.undo;
   trimUndoLog();
@@ -1195,6 +1230,7 @@ const findTx = txId => {
 const resetToGenesis = () => {
   bodyCache.clear();
   blockchain = toHeaderChain([genesisBlock]);
+  cumulativeWork = [];
   uTxOuts = processTxs(genesisBlock.data, [], 0, 0);
   undoLog = [collectConsumed(genesisBlock.data, [])];
   rebuildIndexes();
@@ -1304,6 +1340,7 @@ const initChain = (dataDir) => {
   const tip = headers[headers.length - 1];
 
   blockchain = headers;
+  cumulativeWork = [];
   uTxOuts = utxos;
   undoLog = undo;
   trimUndoLog();
@@ -1491,12 +1528,15 @@ module.exports = {
   BLOCK_VERSION,
   BlOCK_GENERATION_INTERVAL,
   medianTimePast,
+  MEDIAN_TIME_SPAN,
   MAX_FUTURE_BLOCK_TIME,
   isBlockValid,
   isHeaderValid,
   isHeaderStructureValid,
   headerOf,
   chainWork,
+  tipWork,
+  workUpTo,
   addBlockToChain,
   isBlockStructureValid,
   getNewestBlock,
