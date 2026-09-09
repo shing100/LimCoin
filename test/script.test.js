@@ -238,7 +238,7 @@ test("P2SH 다중서명 출력이 실제 블록에 담기고 두 서명으로 �
   const funding = chain[1].data[0];
   const fundTx = {
     txIns: [{ txOutId: funding.id, txOutIndex: 0, signature: "" }],
-    txOuts: [{ address: scriptAddress, amount: funding.txOuts[0].amount - 1000 }],
+    txOuts: [{ address: scriptAddress, amount: funding.txOuts[0].amount - 10000 }],
     lockTime: 0,
     id: ""
   };
@@ -254,7 +254,7 @@ test("P2SH 다중서명 출력이 실제 블록에 담기고 두 서명으로 �
     // 2) 그 출력을 두 서명으로 쓴다
     const spendTx = {
       txIns: [{ txOutId: fundTx.id, txOutIndex: 0, signature: "" }],
-      txOuts: [{ address: minerAddress, amount: fundTx.txOuts[0].amount - 1000 }],
+      txOuts: [{ address: minerAddress, amount: fundTx.txOuts[0].amount - 10000 }],
       lockTime: 0,
       id: ""
     };

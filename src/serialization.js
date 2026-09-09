@@ -118,6 +118,58 @@ const serializeTx = tx => {
 
 const txIdOf = tx => sha256dHex(serializeTx(tx));
 
+/* ------------------------------------------- 크기 (수수료·블록 한도용)
+ *
+ * 수수료는 "이 트랜잭션이 블록에서 차지하는 자리"에 매겨야 한다. 예전에는
+ * 입력 개수를 크기의 대용으로 썼다 — 출력이 백 개인 트랜잭션과 두 개인
+ * 트랜잭션이 같은 값을 냈다.
+ *
+ * 크기는 txid 가 덮는 바이트에 해제 데이터(서명, 공개키, redeemScript,
+ * unlock)를 더한 것이다. 해제 데이터도 망으로 오가고 디스크에 남으므로
+ * 값을 매겨야 한다. 다만 txid 에는 들어가지 않으므로(malleability 없음)
+ * 크기는 서명 뒤에야 확정된다.
+ */
+const varintSize = n => (n < 0xfd ? 1 : n <= 0xffff ? 3 : n <= 0xffffffff ? 5 : 9);
+
+// hex 문자열이 나타내는 바이트 수 (형식이 틀려도 던지지 않는다 — 크기만 센다)
+const hexBytes = value => (typeof value === "string" ? Math.ceil(value.length / 2) : 0);
+
+// varint 길이 + 바이트
+const fieldSize = value => {
+  const bytes = hexBytes(value);
+  return varintSize(bytes) + bytes;
+};
+
+const txSizeOf = tx => {
+  let size = serializeTx(tx).length;
+  for (const txIn of tx.txIns) {
+    size += fieldSize(txIn.signature) + fieldSize(txIn.publicKey) + fieldSize(txIn.redeemScript);
+    const unlock = Array.isArray(txIn.unlock) ? txIn.unlock : [];
+    size += varintSize(unlock.length);
+    for (const item of unlock) {
+      size += fieldSize(item);
+    }
+  }
+  return size;
+};
+
+/*
+ * 아직 서명하지 않은 트랜잭션의 크기를 미리 잰다 (지갑이 수수료를 정할 때).
+ *
+ * P2PKH 입력 하나 = 서명 DER 71~72바이트 + 비압축 공개키 65바이트 + 길이들.
+ * 넉넉한 쪽(72)으로 잡는다 — 모자라게 잡으면 수수료가 부족해 안 담긴다.
+ */
+const SIGNATURE_BYTES = 72;
+const PUBLIC_KEY_BYTES = 65;
+const estimateTxSize = (inputCount, outputCount, addressBytes = 34) =>
+  varintSize(inputCount) +
+  inputCount * (32 + 4 + fieldSizeOfBytes(SIGNATURE_BYTES) + fieldSizeOfBytes(PUBLIC_KEY_BYTES) + 1 + 1) +
+  varintSize(outputCount) +
+  outputCount * (varintSize(addressBytes) + addressBytes + 8) +
+  4;
+
+const fieldSizeOfBytes = bytes => varintSize(bytes) + bytes;
+
 /**
  * 블록 헤더 -> 88바이트.
  *
@@ -152,6 +204,11 @@ module.exports = {
   writeString,
   serializeTx,
   txIdOf,
+  varintSize,
+  txSizeOf,
+  estimateTxSize,
+  SIGNATURE_BYTES,
+  PUBLIC_KEY_BYTES,
   serializeHeader,
   blockHashOf
 };

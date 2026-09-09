@@ -4,7 +4,7 @@ const Keys = require("./keys");
 const Address = require("./address");
 const Params = require("./params");
 const Script = require("./script");
-const { txIdOf } = require("./serialization");
+const { txIdOf, txSizeOf } = require("./serialization");
 const { COIN } = require("./units");
 const { keyOf, outpointKey, indexByOutpoint } = require("./utxo");
 
@@ -39,9 +39,29 @@ const HALVING_INTERVAL = 210000;
  */
 const COINBASE_MATURITY = 10;
 
-// 블록에 담을 수 있는 트랜잭션 수 상한(코인베이스 포함).
-// 예전에는 mempool 전체를 그대로 담아서 스팸을 막을 방법이 없었다.
-const MAX_TXS_PER_BLOCK = 100;
+/*
+ * 블록 한도.
+ *
+ * 예전에는 "트랜잭션 100건"이 유일한 한도였다. 크기를 재지 않으니 출력이
+ * 백 개인 트랜잭션도 한 건, 두 개인 것도 한 건이라 같은 값을 냈다. 진짜
+ * 비용은 바이트다 — 망으로 오가고 디스크에 남고 검증해야 하는 양.
+ *
+ * 100KB / 10초 = 10KB/s. 비트코인(1MB / 600초 ≈ 1.7KB/s)의 여섯 배쯤이다.
+ * 건수 상한은 그대로 두되(검증 횟수의 안전판) 넉넉하게 올린다.
+ */
+const MAX_BLOCK_BYTES = 100000;
+const MAX_TXS_PER_BLOCK = 2000;
+
+// 트랜잭션이 블록에서 차지하는 바이트 (해제 데이터 포함)
+const getTxSize = tx => txSizeOf(tx);
+
+// 릴레이 최소 수수료율(lm/byte). 이보다 낮으면 mempool 이 받지 않는다.
+// 입력 하나짜리 보통 트랜잭션(약 270바이트)이면 1080 lm 쯤 — 예전의
+// "입력당 1000 lm" 과 비슷한 값이다.
+const MIN_RELAY_FEE_RATE = 4;
+
+// 이 트랜잭션의 수수료율 (lm/byte)
+const getTxFeeRate = (tx, uTxOuts) => getTxFee(tx, uTxOuts) / getTxSize(tx);
 
 // 해당 높이의 블록 보조금. 반감이 거듭되면 0 으로 수렴하고,
 // 그 뒤로는 백서대로 수수료만 남는다.
@@ -573,6 +593,12 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex, mtp) => {
     return false;
   }
 
+  const blockBytes = txs.reduce((sum, tx) => sum + getTxSize(tx), 0);
+  if (blockBytes > MAX_BLOCK_BYTES) {
+    console.log(`A block may hold at most ${MAX_BLOCK_BYTES} bytes, this one has ${blockBytes}`);
+    return false;
+  }
+
   const txIns = _(txs)
     .map(tx => tx.txIns)
     .flatten()
@@ -691,7 +717,11 @@ module.exports = {
   getBlockSubsidy,
   getTotalSupply,
   getTxFee,
+  getTxFeeRate,
+  getTxSize,
   sumBlockFees,
+  MAX_BLOCK_BYTES,
+  MIN_RELAY_FEE_RATE,
   HALVING_INTERVAL,
   INITIAL_SUBSIDY,
   MAX_TXS_PER_BLOCK,

@@ -23,6 +23,7 @@ const { keyOf, outpointKey } = require("./utxo");
 
 const Address = require("./address");
 const Keys = require("./keys");
+const { estimateTxSize } = require("./serialization");
 
 const {
   getPublicKey,
@@ -443,6 +444,9 @@ const filterUTxOutsFromMempool = (uTxOutList, mempool) => {
   return uTxOutList.filter(uTxOut => !pending.has(outpointKey(uTxOut)));
 };
 
+// 주소 문자열이 직렬화될 때 차지하는 바이트 (예전 형식은 130, Base58 은 34쯤)
+const addressBytes = address => (typeof address === "string" ? address.length : 34);
+
 const createTxOuts = (receiverAddress, changeAddress, amount, leftOverAmount) => {
   const receiverTxOut = new TxOut(receiverAddress, amount);
   // dust 미만의 잔돈은 출력으로 만들지 않는다. 그 몫은 수수료가 된다.
@@ -462,12 +466,36 @@ const createTxOuts = (receiverAddress, changeAddress, amount, leftOverAmount) =>
  * 서명한다. 거스름돈은 새 주소로 받는다 — 이게 백서 10장이 말하는
  * "트랜잭션마다 새 키"다.
  */
-const createTx = (receiverAddress, amount, uTxOutList, memPool, fee = 0) => {
+const createTx = (receiverAddress, amount, uTxOutList, memPool, fee = 0, feeRate = 0) => {
   if (!Number.isInteger(amount) || amount <= 0) {
     throw Error("보내는 금액은 최소 단위 기준 양의 정수여야 합니다");
   }
   if (!Number.isInteger(fee) || fee < 0) {
     throw Error("수수료는 최소 단위 기준 0 이상의 정수여야 합니다");
+  }
+  if (typeof feeRate !== "number" || feeRate < 0) {
+    throw Error("수수료율은 0 이상이어야 합니다");
+  }
+
+  /*
+   * 수수료율(lm/byte)을 받으면 크기에서 값을 뽑는다.
+   *
+   * 크기는 입력 개수에 달렸고 입력 개수는 수수료에 달렸다(수수료만큼 더
+   * 걷어야 하므로). 서로 물려 있어 한 번에 풀 수 없으니, 수수료를 짐작해
+   * 고르고 → 그 결과로 크기를 다시 재고 → 값이 커졌으면 다시 고른다.
+   * 비트코인 코어도 같은 방식으로 몇 번 돈다.
+   */
+  if (feeRate > 0) {
+    let guess = fee;
+    for (let round = 0; round < 4; round++) {
+      const draft = createTx(receiverAddress, amount, uTxOutList, memPool, guess);
+      const needed = Math.ceil(estimateTxSize(draft.txIns.length, draft.txOuts.length, addressBytes(receiverAddress)) * feeRate);
+      if (needed <= guess) {
+        return draft;
+      }
+      guess = needed;
+    }
+    fee = guess;
   }
   if (amount < DUST) {
     // 받는 쪽이 나중에 쓸 때 드는 값에도 못 미치는 출력이다

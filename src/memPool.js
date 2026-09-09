@@ -1,13 +1,41 @@
 const Transactions = require("./transactions");
 
-const { validateTx, getTxFee, updateUTxOuts, isSpendable } = Transactions;
+const {
+  validateTx, getTxFee, getTxSize, updateUTxOuts, isSpendable, MIN_RELAY_FEE_RATE
+} = Transactions;
 const { keyOf, indexByOutpoint } = require("./utxo");
+const { estimateTxSize } = require("./serialization");
 
-// mempool 에 무한정 쌓이지 않게 상한을 둔다.
-// 예전에는 제한이 없어 스팸 트랜잭션으로 메모리를 밀어낼 수 있었다.
-const MAX_MEMPOOL_SIZE = 500;
+/*
+ * mempool 상한.
+ *
+ * 예전에는 "500건"이 유일한 상한이었다. 건수로 재면 출력이 백 개인
+ * 트랜잭션도 한 건이라, 같은 건수로 메모리를 몇 배씩 쓸 수 있다. 진짜
+ * 비용은 바이트다. 건수 상한은 안전판으로 남겨 둔다.
+ *
+ * 가득 차면 수수료율이 낮은 것부터 밀어낸다 — 예전에는 그냥 거절했다.
+ * 그러면 값싼 트랜잭션이 먼저 들어와 자리를 차지한 뒤로는 아무리 비싼
+ * 트랜잭션도 들어올 수 없었다.
+ */
+const positiveEnv = (name, fallback) => {
+  const value = Number.parseInt(process.env[name], 10);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+};
+// 비트코인의 -maxmempool 처럼 노드마다 조절할 수 있다
+const MAX_MEMPOOL_BYTES = positiveEnv("LIMCOIN_MAX_MEMPOOL_BYTES", 5000000);
+const MAX_MEMPOOL_SIZE = positiveEnv("LIMCOIN_MAX_MEMPOOL_TXS", 5000);
 
 let mempool = [];
+
+/*
+ * 트랜잭션마다 크기와 수수료를 재 두는 표.
+ *
+ * 둘 다 트랜잭션이 정해진 순간 고정된다(입력이 가리키는 금액은 변하지
+ * 않는다). 고를 때마다 다시 재면 mempool 크기에 비례하는 일을 매번 한다.
+ */
+const meta = new Map();
+const metaOf = tx => meta.get(tx.id) || { size: getTxSize(tx), fee: 0 };
+const poolBytes = () => mempool.reduce((sum, tx) => sum + metaOf(tx).size, 0);
 
 /*
  * mempool 이 바뀔 때 알려 줄 곳. blockchain.js 가 저장을 걸어 둔다.
@@ -49,30 +77,6 @@ const notifyChange = () => {
  */
 const getMempool = () => mempool.slice();
 
-// 지금 pool 이 쓰기로 예약한 outpoint 들
-const spentInPool = pool => {
-  const keys = new Set();
-  for (const tx of pool) {
-    for (const txIn of tx.txIns) {
-      keys.add(keyOf(txIn.txOutId, txIn.txOutIndex));
-    }
-  }
-  return keys;
-};
-
-/*
- * 같은 UTxO 를 두 번 쓰려는 트랜잭션인지 본다(이중지불).
- *
- * 예전에는 mempool 전체를 펼쳐 놓고 txIn 마다 선형으로 훑었다.
- * mempool 이 상한(500)까지 차면 추가 한 번에 수만 번을 비교하게 된다.
- */
-const isTxValidForPool = (tx, pool) => {
-  const pending = spentInPool(pool);
-  return tx.txIns.every(
-    txIn => !pending.has(keyOf(txIn.txOutId, txIn.txOutIndex))
-  );
-};
-
 /*
  * 블록이 붙은 뒤, 더는 유효하지 않은 트랜잭션을 pool 에서 뺀다.
  *
@@ -100,6 +104,12 @@ const updateMempool = uTxOutList => {
   const before = mempool.length;
   mempool = kept;
   if (mempool.length !== before) {
+    const alive = new Set(mempool.map(tx => tx.id));
+    for (const id of [...meta.keys()]) {
+      if (!alive.has(id)) {
+        meta.delete(id);
+      }
+    }
     notifyChange();
   }
 };
@@ -127,25 +137,141 @@ const getMatureUTxOuts = (uTxOutList, spendHeight) =>
  * "다음 블록에서 쓸 수 있는가"와 같은 물음이다.
  */
 const addToMempool = (tx, uTxOutList, spendHeight, mtp) => {
-  if (mempool.length >= MAX_MEMPOOL_SIZE) {
-    throw Error(`The mempool is full (${MAX_MEMPOOL_SIZE} txs). Try again later.`);
-  }
   /*
-   * 이중지불 검사를 먼저 한다.
+   * 바꿔치기(RBF)를 먼저 살핀다.
    *
-   * 아래 validateTx 도 결국 걸러 내기는 한다 — getSpendableUTxOuts 가
-   * mempool 이 이미 쓴 outpoint 를 빼 주기 때문이다. 다만 그때의 이유는
-   * "참조하는 출력이 없다"가 되어, 왜 거부됐는지 알기 어렵다.
+   * 같은 출력을 쓰려는 트랜잭션이 이미 있으면 이중지불이다. 다만 보낸
+   * 사람이 수수료를 더 얹어 다시 보내는 것은 받아 준다 — 수수료를 적게
+   * 매겨 몇 시간씩 묶이는 것을 푸는 길이 그것뿐이다.
+   *
+   * 검증은 "밀려날 것들을 뺀" 상태에서 해야 한다. 그러지 않으면 그 출력이
+   * 이미 쓰였다는 이유로 검증에서 먼저 떨어져 바꿔치기가 아예 안 된다.
+   *
+   * 비트코인은 sequence 로 "이 트랜잭션은 바꿔도 된다"를 미리 밝히게 했다
+   * (BIP125). 여기에는 sequence 가 없으므로 언제나 바꿀 수 있다 — 비트코인
+   * 코어도 지금은 그것을 기본값으로 한다(full-RBF).
    */
-  if (!isTxValidForPool(tx, mempool)) {
-    throw Error("This tx is not valid for the pool. Will not add it.");
-  }
-  // 확정된 것뿐 아니라 mempool 이 만든 출력도 볼 수 있어야 한다
-  if (!validateTx(tx, getSpendableUTxOuts(uTxOutList), undefined, spendHeight, mtp)) {
+  const conflicts = conflictingTxs(tx);
+  const evicted = conflicts.length > 0 ? withDescendants(conflicts) : [];
+  const doomed = new Set(evicted.map(other => other.id));
+  const survivors = mempool.filter(other => !doomed.has(other.id));
+  const spendable = updateUTxOuts(survivors, uTxOutList);
+
+  if (!validateTx(tx, spendable, undefined, spendHeight, mtp)) {
     throw Error("This tx is invalid. Will not add it to pool");
   }
+
+  const size = getTxSize(tx);
+  const fee = getTxFee(tx, indexByOutpoint(spendable));
+  const feeRate = fee / size;
+  if (feeRate < MIN_RELAY_FEE_RATE) {
+    throw Error(
+      `수수료가 너무 낮습니다: ${fee} lm / ${size}바이트 = ${feeRate.toFixed(2)} lm/byte ` +
+        `(최소 ${MIN_RELAY_FEE_RATE}). GET /fees 를 보세요.`
+    );
+  }
+
+  if (conflicts.length > 0) {
+    checkReplacement({ size, fee, feeRate }, conflicts, evicted);
+    mempool = survivors;
+    for (const id of doomed) {
+      meta.delete(id);
+    }
+  }
+
+  makeRoomFor(size, feeRate);
+
   mempool.push(tx);
+  meta.set(tx.id, { size, fee });
   notifyChange();
+};
+
+// 이 트랜잭션과 같은 출력을 쓰려는 mempool 트랜잭션들
+const conflictingTxs = tx => {
+  const wanted = new Set(tx.txIns.map(txIn => keyOf(txIn.txOutId, txIn.txOutIndex)));
+  return mempool.filter(other =>
+    other.txIns.some(txIn => wanted.has(keyOf(txIn.txOutId, txIn.txOutIndex)))
+  );
+};
+
+// 이 트랜잭션들이 만든 출력을 쓰는 mempool 트랜잭션까지 모두 (자기 자신 포함)
+const withDescendants = txs => {
+  const chosen = new Map(txs.map(tx => [tx.id, tx]));
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const tx of mempool) {
+      if (chosen.has(tx.id)) {
+        continue;
+      }
+      if (tx.txIns.some(txIn => chosen.has(txIn.txOutId))) {
+        chosen.set(tx.id, tx);
+        grew = true;
+      }
+    }
+  }
+  return [...chosen.values()];
+};
+
+// 바꿔치기(RBF) 규칙. 통과하지 못하면 던진다.
+const MAX_REPLACED = 100;
+
+const checkReplacement = ({ size, fee, feeRate }, conflicts, evicted) => {
+  if (evicted.length > MAX_REPLACED) {
+    throw Error(`한 번에 ${MAX_REPLACED}건을 넘게 밀어낼 수 없습니다 (${evicted.length}건)`);
+  }
+  const replacedFee = evicted.reduce((sum, other) => sum + metaOf(other).fee, 0);
+  const worstRate = Math.max(...conflicts.map(other => metaOf(other).fee / metaOf(other).size));
+
+  // 수수료율이 더 높아야 한다 — 크기만 키워 총액을 맞춘 것은 자리를 더 먹는다
+  if (feeRate <= worstRate) {
+    throw Error(
+      `바꾸려면 수수료율이 더 높아야 합니다 (${feeRate.toFixed(2)} <= ${worstRate.toFixed(2)} lm/byte)`
+    );
+  }
+  /*
+   * 밀려나는 것들의 수수료 합보다 많이 내야 하고, 자기가 쓰는 대역폭 값도
+   * 따로 내야 한다. 이 조건이 없으면 1 lm 씩 올리며 같은 자리를 무한히
+   * 다시 쓰게 만들어 망 전체에 릴레이를 시킬 수 있다.
+   */
+  const required = replacedFee + size * MIN_RELAY_FEE_RATE;
+  if (fee < required) {
+    throw Error(
+      `바꾸려면 수수료가 ${required} lm 이상이어야 합니다 ` +
+        `(밀려나는 ${replacedFee} + 대역폭 ${size * MIN_RELAY_FEE_RATE}, 낸 값 ${fee})`
+    );
+  }
+};
+
+/*
+ * 자리를 만든다. 가득 찼으면 수수료율이 낮은 것부터(자식까지 함께) 밀어낸다.
+ * 새로 들어오려는 것이 밀어낼 것보다 싸면 그냥 거절한다.
+ */
+const makeRoomFor = (size, feeRate) => {
+  while (poolBytes() + size > MAX_MEMPOOL_BYTES || mempool.length + 1 > MAX_MEMPOOL_SIZE) {
+    if (mempool.length === 0) {
+      throw Error(`트랜잭션이 너무 큽니다 (${size}바이트, 상한 ${MAX_MEMPOOL_BYTES})`);
+    }
+    let worst = mempool[0];
+    let worstRate = Infinity;
+    for (const other of mempool) {
+      const rate = metaOf(other).fee / metaOf(other).size;
+      if (rate < worstRate) {
+        worstRate = rate;
+        worst = other;
+      }
+    }
+    if (feeRate <= worstRate) {
+      throw Error(
+        `mempool 이 가득 찼습니다. 수수료율이 ${worstRate.toFixed(2)} lm/byte 보다 높아야 합니다.`
+      );
+    }
+    const gone = new Set(withDescendants([worst]).map(other => other.id));
+    mempool = mempool.filter(other => !gone.has(other.id));
+    for (const id of gone) {
+      meta.delete(id);
+    }
+  }
 };
 
 /*
@@ -158,8 +284,10 @@ const addToMempool = (tx, uTxOutList, spendHeight, mtp) => {
  * 재지 않으므로 입력 개수를 크기의 대용으로 쓴다 — 입력이 많을수록 서명
  * 검증 비용도 커지기 때문이다.
  */
-const selectTxsForBlock = (candidates, uTxOutList, limit, spendHeight) => {
-  if (limit <= 0) {
+const selectTxsForBlock = (candidates, uTxOutList, limits, spendHeight) => {
+  const maxTxs = typeof limits === "number" ? limits : limits.maxTxs;
+  const maxBytes = typeof limits === "number" ? Infinity : limits.maxBytes;
+  if (maxTxs <= 0 || maxBytes <= 0) {
     return [];
   }
 
@@ -170,29 +298,18 @@ const selectTxsForBlock = (candidates, uTxOutList, limit, spendHeight) => {
    * 다시 어려질 수 있다. 그대로 담으면 스스로 만든 블록이 검증에서
    * 떨어진다. 빼기만 하고 mempool 에는 남겨 둔다 — 블록이 더 쌓이면
    * 그때 담기면 된다.
-   *
-   * 확정 집합에 없는 입력은 mempool 이 만든 출력이다. mempool 에는
-   * 코인베이스가 없으므로 성숙도를 따질 일이 없다.
    */
   const confirmed = indexByOutpoint(uTxOutList);
-  const mature = candidates.filter(tx =>
+  candidates = candidates.filter(tx =>
     tx.txIns.every(txIn => {
       const source = confirmed.get(keyOf(txIn.txOutId, txIn.txOutIndex));
       return source === undefined || isSpendable(source, spendHeight);
     })
   );
-  candidates = mature;
 
-  // 부모가 만든 출력을 자식이 쓰는 경우가 있으므로, 수수료율만 보고 자를 수
+  // 부모가 만든 출력을 자식이 쓰는 경우가 있으므로 수수료율만 보고 자를 수
   // 없다. 부모 없이 자식만 담기면 그 블록은 검증에서 떨어진다.
   const producedBy = new Map(); // outpoint -> 그것을 만든 tx
-
-  /*
-   * 수수료를 구하려면 입력이 가리키는 출력을 되짚어야 한다. 확정된 것만
-   * 보면 부모가 mempool 에 있는 자식은 입력이 "없는 출력"이 되어 수수료가
-   * 크게 음수로 나오고, 줄 세우기가 뒤집힌다. 후보들이 만든 출력도 함께
-   * 넣어 둔다.
-   */
   const sources = indexByOutpoint(uTxOutList);
   for (const tx of candidates) {
     tx.txOuts.forEach((txOut, index) => {
@@ -201,18 +318,48 @@ const selectTxsForBlock = (candidates, uTxOutList, limit, spendHeight) => {
     });
   }
 
-  const byFeeRate = candidates
-    .map(tx => ({
-      tx,
-      feeRate: getTxFee(tx, sources) / Math.max(1, tx.txIns.length)
-    }))
-    .sort((a, b) => b.feeRate - a.feeRate)
-    .map(entry => entry.tx);
+  const sizeOf = new Map(candidates.map(tx => [tx.id, getTxSize(tx)]));
+  const feeOf = new Map(candidates.map(tx => [tx.id, getTxFee(tx, sources)]));
+
+  // 아직 담기지 않은 조상들 (자기 자신 포함)
+  const ancestorsOf = tx => {
+    const found = new Map();
+    const walk = current => {
+      if (found.has(current.id)) {
+        return;
+      }
+      found.set(current.id, current);
+      for (const txIn of current.txIns) {
+        const parent = producedBy.get(keyOf(txIn.txOutId, txIn.txOutIndex));
+        if (parent !== undefined) {
+          walk(parent);
+        }
+      }
+    };
+    walk(tx);
+    return [...found.values()];
+  };
+
+  /*
+   * 묶음(조상 포함) 수수료율로 줄을 세운다.
+   *
+   * 수수료를 적게 매긴 부모가 mempool 에 묶여 있으면, 받는 쪽이 그 출력을
+   * 쓰면서 수수료를 두둑이 얹어 부모까지 끌어올릴 수 있다(CPFP). 자기
+   * 수수료율만 보면 부모가 싸다는 이유로 둘 다 뒤로 밀린다.
+   */
+  const scored = candidates
+    .map(tx => {
+      const package_ = ancestorsOf(tx);
+      const fee = package_.reduce((sum, member) => sum + feeOf.get(member.id), 0);
+      const size = package_.reduce((sum, member) => sum + sizeOf.get(member.id), 0);
+      return { tx, score: fee / size };
+    })
+    .sort((a, b) => b.score - a.score);
 
   const selected = [];
   const taken = new Set();
+  let bytes = 0;
 
-  // 부모를 먼저 담고 자식을 담는다. 자리가 모자라면 그 갈래는 통째로 뺀다.
   const take = (tx, seen) => {
     if (taken.has(tx.id)) {
       return true;
@@ -228,26 +375,29 @@ const selectTxsForBlock = (candidates, uTxOutList, limit, spendHeight) => {
         return false;
       }
     }
-    if (selected.length >= limit) {
+    const size = sizeOf.get(tx.id);
+    if (selected.length >= maxTxs || bytes + size > maxBytes) {
       return false;
     }
     selected.push(tx);
     taken.add(tx.id);
+    bytes += size;
     return true;
   };
 
-  for (const tx of byFeeRate) {
-    if (selected.length >= limit) {
+  for (const { tx } of scored) {
+    if (selected.length >= maxTxs) {
       break;
     }
-    // 담다가 자리가 모자라면 이 갈래는 통째로 버린다 —
-    // 이미 담은 것은 그대로 두되, 부모 없는 자식이 남지 않게 하려면
-    // 실패한 갈래에서 새로 담은 것을 되돌려야 한다.
+    // 담다가 자리가 모자라면 이 갈래는 통째로 버린다 — 부모 없는 자식이
+    // 남으면 안 되므로 실패한 갈래에서 새로 담은 것을 되돌린다.
     const before = selected.length;
+    const bytesBefore = bytes;
     if (!take(tx, new Set())) {
       for (const rolledBack of selected.splice(before)) {
         taken.delete(rolledBack.id);
       }
+      bytes = bytesBefore;
     }
   }
 
@@ -255,49 +405,59 @@ const selectTxsForBlock = (candidates, uTxOutList, limit, spendHeight) => {
 };
 
 /*
- * 권장 수수료 (입력 하나당).
+ * 권장 수수료율 (lm/byte).
  *
- * 블록에는 코인베이스를 뺀 MAX_TXS_PER_BLOCK - 1 건이 들어가고, 수수료율
- * (수수료 / 입력 수)이 높은 순으로 담긴다. mempool 에 그보다 적게 있으면
- * 다음 블록에 자리가 있으므로 바닥값이면 된다. 그보다 많으면 담기는
- * 마지막 자리의 수수료율보다 조금 높아야 한다.
+ * 다음 블록에 담기려면 얼마를 내야 하는가. 블록은 바이트로 차므로,
+ * mempool 을 수수료율 높은 순으로 세워 놓고 블록 한 개 분량을 채운 뒤
+ * 잘리는 자리의 값을 본다. 그만큼 차지 않았으면 바닥값이면 된다.
  *
- * 지갑이 수수료를 사용자에게 통째로 맡기고 있었다. 비트코인 코어의
- * estimatesmartfee 처럼 과거 블록을 보는 것은 아니고, 지금 mempool 만 본다.
+ * 비트코인 코어의 estimatesmartfee 처럼 과거 블록의 통계를 보는 것은
+ * 아니고, 지금 mempool 만 본다.
  */
-const MIN_FEE_PER_INPUT = 1000; // = dust. 이보다 작은 수수료는 의미가 없다
-
-const estimateFee = (uTxOutList, blockCapacity) => {
+const estimateFee = (uTxOutList, blockBytes) => {
   const sources = indexByOutpoint(uTxOutList);
   for (const tx of mempool) {
     tx.txOuts.forEach((txOut, index) => sources.set(keyOf(tx.id, index), txOut));
   }
-  const rates = mempool
-    .map(tx => getTxFee(tx, sources) / Math.max(1, tx.txIns.length))
-    .sort((a, b) => b - a);
+  const entries = mempool
+    .map(tx => {
+      const size = getTxSize(tx);
+      return { size, rate: getTxFee(tx, sources) / size };
+    })
+    .sort((a, b) => b.rate - a.rate);
 
-  const roomLeft = blockCapacity - rates.length;
-  if (roomLeft > 0) {
-    return {
-      perInput: MIN_FEE_PER_INPUT,
-      congested: false,
-      mempoolSize: rates.length,
-      blockCapacity
-    };
+  const mempoolBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+  const typicalBytes = estimateTxSize(1, 2);
+
+  const answer = (perByte, congested) => ({
+    perByte,
+    // 입력 하나, 출력 둘짜리 보통 트랜잭션이 내야 할 값 — 지갑이 바로 쓴다
+    typicalTx: { bytes: typicalBytes, fee: Math.ceil(perByte * typicalBytes) },
+    congested,
+    mempoolSize: mempool.length,
+    mempoolBytes,
+    blockBytes
+  });
+
+  if (mempoolBytes < blockBytes) {
+    return answer(MIN_RELAY_FEE_RATE, false);
   }
-  // 담길 마지막 자리의 수수료율. 그보다 1 lm 만 높으면 그 자리를 밀어낸다.
-  const cutoff = rates[blockCapacity - 1];
-  return {
-    perInput: Math.max(MIN_FEE_PER_INPUT, Math.ceil(cutoff) + 1),
-    congested: true,
-    mempoolSize: rates.length,
-    blockCapacity
-  };
+  // 블록 한 개 분량을 채우고 잘리는 자리의 수수료율
+  let filled = 0;
+  let cutoff = MIN_RELAY_FEE_RATE;
+  for (const entry of entries) {
+    cutoff = entry.rate;
+    filled += entry.size;
+    if (filled >= blockBytes) {
+      break;
+    }
+  }
+  return answer(Math.max(MIN_RELAY_FEE_RATE, Math.floor(cutoff) + 1), true);
 };
 
 module.exports = {
   estimateFee,
-  MIN_FEE_PER_INPUT,
+  MAX_MEMPOOL_BYTES,
   addToMempool,
   getSpendableUTxOuts,
   getMatureUTxOuts,
@@ -306,5 +466,6 @@ module.exports = {
   getMempool,
   updateMempool,
   selectTxsForBlock,
+  poolBytes,
   MAX_MEMPOOL_SIZE
 };

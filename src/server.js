@@ -31,7 +31,8 @@ const AddressIndexApi = require("./addressIndex");
 const { getMempool } = Mempool;
 const {
   isAddressValid, getBlockSubsidy, getTotalSupply,
-  HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK, COINBASE_MATURITY
+  HALVING_INTERVAL, INITIAL_SUBSIDY, MAX_TXS_PER_BLOCK, MAX_BLOCK_BYTES,
+  MIN_RELAY_FEE_RATE, COINBASE_MATURITY
 } = Transactions;
 const { COIN, DECIMALS } = require("./units");
 
@@ -604,12 +605,22 @@ app.route("/transactions")
   })
   .post(requireWalletAuth, requireWallet, (req, res) => {
     try {
-      const { body: { address, amount, fee = 0 } } = req;
+      const { body: { address, amount, fee, feeRate } } = req;
       if (address === undefined || amount === undefined) {
         throw Error("Please specify an address and an amount");
       }
-      // amount 와 fee 는 최소 단위(lm) 정수다. 1 LIM = 100,000,000 lm.
-      res.send(sendTx(address, amount, fee));
+      /*
+       * amount 와 fee 는 최소 단위(lm) 정수다. 1 LIM = 100,000,000 lm.
+       *
+       * fee 를 직접 주면 그대로 쓰고, feeRate(lm/byte)를 주면 크기에서
+       * 뽑는다. 둘 다 없으면 지금 mempool 이 권하는 값을 쓴다 — 예전에는
+       * 아무것도 안 주면 수수료 0 이라 그대로 묶였다.
+       */
+      const rate =
+        feeRate === undefined && fee === undefined
+          ? Mempool.estimateFee(getUTxOutList(), MAX_BLOCK_BYTES).perByte
+          : feeRate || 0;
+      res.send(sendTx(address, amount, fee || 0, rate));
     } catch (e) {
       res.status(400).send(e.message);
     }
@@ -746,10 +757,13 @@ app.get("/info", (req, res) => {
     nextHalvingAtHeight:
       (Math.floor(nextIndex / HALVING_INTERVAL) + 1) * HALVING_INTERVAL,
     maxTxsPerBlock: MAX_TXS_PER_BLOCK,
+    maxBlockBytes: MAX_BLOCK_BYTES,
+    minRelayFeeRate: MIN_RELAY_FEE_RATE,
     coinbaseMaturity: COINBASE_MATURITY,
     indexedAddresses: AddressIndex.getIndexedAddressCount(),
     // 지갑이 기본값으로 쓸 입력당 권장 수수료
-    recommendedFeePerInput: Mempool.estimateFee(getUTxOutList(), MAX_TXS_PER_BLOCK - 1).perInput,
+    recommendedFeePerByte: Mempool.estimateFee(getUTxOutList(), MAX_BLOCK_BYTES).perByte,
+    mempoolBytes: Mempool.poolBytes(),
     // 어느 망의 노드인지. 주소 형식과 제네시스가 이것으로 갈린다.
     network: Params.current().name,
     addressVersion: Params.current().addressVersion,
@@ -765,7 +779,7 @@ app.get("/info", (req, res) => {
  * 있으면 바닥값, 넘치면 담기는 마지막 자리보다 조금 높은 값.
  */
 app.get("/fees", (req, res) => {
-  res.send(Mempool.estimateFee(getUTxOutList(), MAX_TXS_PER_BLOCK - 1));
+  res.send(Mempool.estimateFee(getUTxOutList(), MAX_BLOCK_BYTES));
 });
 
 app.get("/address/:address", (req, res) => {

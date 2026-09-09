@@ -27,7 +27,8 @@ const {
   sumBlockFees,
   isSpendable,
   COINBASE_MATURITY,
-  MAX_TXS_PER_BLOCK
+  MAX_TXS_PER_BLOCK,
+  MAX_BLOCK_BYTES
 } = Transactions;
 
 const {
@@ -182,10 +183,15 @@ const mineTemplate = async () => {
 
   // mempool 전체를 그대로 담던 것을 한도 안에서 수수료율 높은 순으로 고른다.
   // 코인베이스 자리 하나를 빼고 담는다.
+  /*
+   * 코인베이스 자리를 미리 빼 둔다. 블록 한도는 바이트가 먼저고 건수는
+   * 안전판이다 — 코인베이스는 한 건에 200바이트쯤 든다.
+   */
+  const COINBASE_RESERVE = 400;
   const selected = selectTxsForBlock(
     getMempool(),
     snapshot,
-    MAX_TXS_PER_BLOCK - 1,
+    { maxTxs: MAX_TXS_PER_BLOCK - 1, maxBytes: MAX_BLOCK_BYTES - COINBASE_RESERVE },
     nextIndex
   );
   /*
@@ -198,7 +204,10 @@ const mineTemplate = async () => {
   // 채굴자는 보조금에 더해 담은 트랜잭션들의 수수료를 가져간다 (백서 6장)
   const coinbaseTx = createCoinbaseTx(miningAddress(), nextIndex, totalFees);
 
-  const full = selected.length >= MAX_TXS_PER_BLOCK - 1;
+  const full =
+    selected.length >= MAX_TXS_PER_BLOCK - 1 ||
+    selected.reduce((sum, tx) => sum + Transactions.getTxSize(tx), 0) >=
+      MAX_BLOCK_BYTES - COINBASE_RESERVE;
   return await createNewRawBlock([coinbaseTx, ...selected], { restartOnNewTx: !full });
 };
 
@@ -1042,7 +1051,7 @@ const getAccountBalance = () => getWalletBalance(uTxOuts);
  * 확인 절차에는 확정된 집합을 그대로 넘긴다. addToMempool 이 안에서
  * 같은 계산을 하므로 두 번 더하면 안 된다.
  */
-const sendTx = (address, amount, fee = 0) => {
+const sendTx = (address, amount, fee = 0, feeRate = 0) => {
   const confirmed = getUTxOutList();
   let tx;
   try {
@@ -1052,7 +1061,8 @@ const sendTx = (address, amount, fee = 0) => {
       // 아직 묻히지 않은 코인베이스는 고르지 않는다. 골라 봐야 검증에서 떨어진다.
       getMatureUTxOuts(getSpendableUTxOuts(confirmed), nextHeight()),
       getMempool(),
-      fee
+      fee,
+      feeRate
     );
   } catch (e) {
     /*

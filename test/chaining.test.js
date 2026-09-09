@@ -143,11 +143,13 @@ test("mempool 이 만든 출력을 이어서 쓸 수 있다", () => {
   const uTxOuts = [seedUTxOut(alice, "seed", 10 * COIN)];
 
   Mempool.updateMempool([]);
-  const t1 = spend(alice, bob.address, "seed", 0, 3 * COIN, 7 * COIN);
+  // 최소 릴레이 수수료(4 lm/byte)를 넘기게 거스름돈을 조금 덜 돌려받는다
+  const t1 = spend(alice, bob.address, "seed", 0, 3 * COIN, 7 * COIN - 10000);
   Mempool.addToMempool(t1, uTxOuts);
 
   // 확인을 기다리지 않고 거스름돈을 바로 이어서 쓴다
-  const t2 = spend(alice, bob.address, t1.id, 1, 2 * COIN, 5 * COIN);
+  // t1 의 거스름돈은 7 - 0.0001 이므로 여기서도 그만큼 덜 돌려받아야 수수료가 남는다
+  const t2 = spend(alice, bob.address, t1.id, 1, 2 * COIN, 5 * COIN - 20000);
   Mempool.addToMempool(t2, uTxOuts);
 
   assert.strictEqual(Mempool.getMempool().length, 2);
