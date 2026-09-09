@@ -29,6 +29,18 @@
 
 ### 고침
 
+- **`chainwork` 를 물을 때마다 체인을 통째로 훑던 것.** 높이별 누적값을 캐시
+  한다. 10만 블록에서 31.57ms → 0.000014ms, 그리고 이제 높이에 비례하지
+  않는다. `getblock`·`getblockchaininfo` 뿐 아니라 P2P 방송, `/info`,
+  `/metrics` 가 다 이 값을 쓰고 있었다.
+- **`listunspent` 가 `maxconf` 와 `addresses` 를 버리던 것.** 주소 하나만
+  달라는 요청에 지갑 전체를 돌려주고 있었다.
+- **`walletpassphrase` 가 `timeout` 을 버리던 것.** 부른 쪽은 잠긴 줄 알지만
+  지갑은 계속 열려 있었다.
+- **`getwalletinfo`** 의 `txcount`(노드 전체 주소 수를 주고 있었다)와
+  `unconfirmed_balance`(0 고정).
+- `getblock` 이 블록을 세 번 직렬화하던 것, MTP 에 앞부분 전체를 넘기던 것,
+  `bits` 가 8자리로 채워지지 않던 것.
 - **raw 왕복이 깨지는 자리** (퍼저가 찾음). 주소 바이트가 UTF-8 이 아니면
   `toString("utf8")` 이 U+FFFD 로 바꿔 1바이트가 3바이트가 됐고, 서로 다른
   바이트열이 같은 트랜잭션으로 읽혔다. 이제 거부한다.

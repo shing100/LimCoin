@@ -19,7 +19,7 @@ const express = require("express"),
 
 const {
   getBlockChain, createNewBlock, getAccountBalance, getSpendableBalance,
-  getImmatureBalance, sendTx, getUTxOutList, persistMempool, submitTx, chainWork,
+  getImmatureBalance, sendTx, getUTxOutList, persistMempool, submitTx, tipWork,
   getTxProof, getNewestBlock, initChain, getBlockByHash, findTx
 } = Blockchain;
 const { getTxFee } = Transactions;
@@ -496,7 +496,7 @@ app.get("/metrics", (req, res) => {
   const lines = [
     "# TYPE limcoin_height gauge", `limcoin_height ${newest.index}`,
     "# TYPE limcoin_difficulty gauge", `limcoin_difficulty ${Target.difficultyOf(newest.bits)}`,
-    "# TYPE limcoin_chain_work gauge", `limcoin_chain_work ${chainWork(getBlockChain()).toString()}`,
+    "# TYPE limcoin_chain_work gauge", `limcoin_chain_work ${tipWork().toString()}`,
     "# TYPE limcoin_tip_age_seconds gauge", `limcoin_tip_age_seconds ${Math.round(Date.now() / 1000) - newest.timestamp}`,
     "# TYPE limcoin_peers gauge", `limcoin_peers ${getPeers().length}`,
     "# TYPE limcoin_mempool_size gauge", `limcoin_mempool_size ${getMempool().length}`,
@@ -867,7 +867,7 @@ app.get("/info", (req, res) => {
     nodeId: Transport.nodeId(),
     encryption: Transport.mode(),
     genesisHash: getBlockChain()[0].hash,
-    chainWork: chainWork(getBlockChain()).toString(),
+    chainWork: tipWork().toString(),
     walletEnabled: Wallet.isEnabled(),
     walletLocked: Wallet.isEnabled() && Wallet.isLocked(),
     version: VERSION
