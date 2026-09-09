@@ -20,11 +20,11 @@
 
 ```bash
 yarn install
-yarn test                                   # 170건, node:test (프레임워크 없음)
+yarn test                                   # 282건, node:test (프레임워크 없음)
 LIMCOIN_NETWORK=testnet node src/server.js  # 테스트넷 노드
 ```
 
-Node 18 이상. 뜨면 지갑 토큰이 콘솔에 찍힌다(`LIMCOIN_WALLET_TOKEN` 으로 고정 가능).
+Node 20 이상. 뜨면 지갑 토큰이 콘솔에 찍힌다(`LIMCOIN_WALLET_TOKEN` 으로 고정 가능).
 
 ```bash
 T=<토큰>
@@ -135,14 +135,28 @@ reorg 정책, 체크리스트는 [docs/EXCHANGE.md](docs/EXCHANGE.md).
 ## 개발
 
 ```bash
-yarn test                    # 전체
+yarn test                    # 전체 282건
+yarn lint                    # eslint — 오타 전역, 안 쓰는 변수, 삼킨 예외
+yarn coverage                # 줄·분기 커버리지
+yarn fuzz                    # 퍼징만. LIMCOIN_FUZZ_SEED 로 씨앗을 바꾼다
 node --test test/sync.test.js
 node scripts/generate-genesis.js --network testnet   # 제네시스 다시 만들기 (모든 노드가 공유해야 한다)
 ```
 
-테스트는 Node 내장 `node:test` 로 170건. 실제로 nonce 를 찾아 블록을 만들고
+테스트는 Node 내장 `node:test` 로 282건. 실제로 nonce 를 찾아 블록을 만들고
 (`test/helpers.js`), 두세 노드를 띄워 동기화·reorg·피어 발견을 확인하는 식이다.
 암호 기본 요소는 외부 벡터(비트코인 주소, secp256k1 G, sha256d)로 맞춘다.
+줄 커버리지는 93%.
+
+`test/fuzz.test.js` 는 반대 방향이다 — 씨앗을 고정한 난수를 잔뜩 넣고 "어떤
+입력이 와도 성립해야 하는 것"만 본다: 남이 보낸 것을 다루는 자리(P2P 메시지,
+스크립트, raw 디코더, 주소, RPC)는 던지지 않는다, 왕복은 제자리로 돌아온다,
+목표값이 쉬워지면 일한 양이 준다. 실제로 raw 디코더의 왕복이 깨지는 자리를
+여기서 찾았다.
+
+CI(GitHub Actions)는 Node 20·22·24 에서 린트·테스트·커버리지를 돌리고,
+퍼저는 씨앗 셋으로 따로 돌리고, 컨테이너를 실제로 띄워 블록 하나를 만들어
+본다.
 
 무엇을 왜 바꿨는지는 [docs/HISTORY.md](docs/HISTORY.md) 에 있다. 짧게는 —
 2018년 코드는 Linux 에서 뜨지 않았고, 서명 검증이 죽은 코드였고, 제네시스
@@ -150,7 +164,8 @@ node scripts/generate-genesis.js --network testnet   # 제네시스 다시 만�
 
 ## 한계
 
-- 단일 구현. 합의 버그가 곧 체인의 버그다.
-- P2P 는 암호화·인증 없는 WebSocket JSON. 피어 평판(ban score) 없음.
+- 단일 구현. 합의 버그가 곧 체인의 버그다. 다른 언어 구현이 맞춰 볼 수 있게
+  [SPEC.md](docs/SPEC.md) 를 규범으로 적어 두었다.
 - 헤더 동기화는 갈라진 부분의 해시를 메모리에 둔다(10만 블록 ≈ 13MB).
 - 외부 보안 감사를 받지 않았다.
+- 공개 해시레이트가 없다. 코드보다 이쪽이 더 큰 관문이다.

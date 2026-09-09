@@ -183,3 +183,28 @@ test("무작위로 만든 트랜잭션 200개가 모두 왕복한다", () => {
     assert.deepStrictEqual(S.decodeTx(S.encodeTx(tx)), tx, `round ${round}`);
   }
 });
+
+test("UTF-8 이 아닌 주소 바이트는 거부한다 (퍼저가 찾은 것)", () => {
+  /*
+   * Buffer.toString("utf8") 은 읽을 수 없는 바이트를 U+FFFD 로 바꿔 준다.
+   * 그 문자열을 다시 적으면 1바이트가 3바이트가 되어 왕복이 깨졌다. 더 나쁜
+   * 것은 서로 다른 바이트열이 모두 같은 트랜잭션으로 읽혀 같은 txid 가 되는
+   * 것이다. 주소는 Base58 이나 공개키 hex 라 늘 ASCII 다 — 아니면 거부한다.
+   */
+  const bad = Buffer.concat([
+    Buffer.from([0x01]), // 입력 1개
+    Buffer.alloc(32, 0xab),
+    Buffer.from([0, 0, 0, 0]), // txOutIndex
+    Buffer.from([0, 0, 0, 0]), // signature/publicKey/redeemScript 없음, unlock 0개
+    Buffer.from([0x01]), // 출력 1개
+    Buffer.from([0x01, 0xbc]), // 주소 1바이트 = 0xbc — UTF-8 이 아니다
+    Buffer.alloc(8), // amount
+    Buffer.from([0, 0, 0, 0]) // lockTime
+  ]).toString("hex");
+
+  assert.throws(() => S.decodeTx(bad), /UTF-8/);
+
+  // 같은 자리에 ASCII 를 넣으면 읽히고, 왕복도 한다
+  const ok = bad.replace("01bc", "014c"); // 'L'
+  assert.strictEqual(S.encodeTx(S.decodeTx(ok)), ok);
+});

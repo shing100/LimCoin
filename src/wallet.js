@@ -150,7 +150,7 @@ const decryptWallet = (file, passphrase) => {
       decipher.final()
     ]).toString("utf8");
     return JSON.parse(plain);
-  } catch (e) {
+  } catch {
     throw Error("암호가 맞지 않습니다");
   }
 };
@@ -166,7 +166,7 @@ const isEncrypted = () => {
   }
   try {
     return readFile().crypto !== undefined;
-  } catch (e) {
+  } catch {
     return false;
   }
 };
@@ -252,7 +252,7 @@ const writeWallet = wallet => {
   });
   try {
     fs.chmodSync(walletLocation(), WALLET_MODE);
-  } catch (e) {
+  } catch {
     // 권한 개념이 없는 파일 시스템(윈도우 등)이면 넘어간다
   }
 };

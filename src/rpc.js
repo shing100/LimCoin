@@ -29,9 +29,8 @@ const Params = require("./params");
 const Target = require("./target");
 const P2P = require("./p2p");
 const Transport = require("./transport");
-const Script = require("./script");
 const S = require("./serialization");
-const { COIN, formatLim, parseLim } = require("./units");
+const { formatLim, parseLim } = require("./units");
 const { indexByOutpoint, keyOf } = require("./utxo");
 
 // 비트코인 코어의 오류 코드. 상대 도구가 이 숫자를 보고 갈래를 탄다.
@@ -73,7 +72,7 @@ const fromLim = value => {
   }
   try {
     return parseLim(String(value));
-  } catch (e) {
+  } catch {
     fail(ERROR.TYPE, `금액이 올바르지 않습니다: ${value}`);
   }
 };
@@ -257,8 +256,10 @@ define("getblockheader", ["blockhash", "verbose"], params => {
   if (verbose === false) {
     return S.serializeHeader(block).toString("hex");
   }
-  const { tx, nTx, ...header } = blockToJson(block, 1);
-  return { ...header, nTx };
+  // tx 목록만 뺀다 — 헤더에는 개수(nTx)만 실린다 (비트코인과 같다)
+  const full = blockToJson(block, 1);
+  delete full.tx;
+  return full;
 });
 
 define("getblockchaininfo", [], () => {

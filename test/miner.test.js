@@ -60,7 +60,9 @@ test("워커가 죽으면 풀을 버리고 다음 채굴이 새로 띄운다", a
 
   await pool[0].terminate();
   // exit 핸들러가 돌 시간을 준다
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => {
+    setImmediate(resolve);
+  });
 
   // 수정 전에는 죽은 워커가 풀에 남아 그 워커의 일감은 영원히 답이 없었다
   const fresh = getMinerPool();

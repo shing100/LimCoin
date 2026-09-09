@@ -193,9 +193,6 @@ const hello = url => ({ type: HELLO, data: { network: NETWORK_MAGIC, url } });
 const getPeersMessage = () => ({ type: GET_PEERS, data: null });
 const peersResponse = peers => ({ type: PEERS_RESPONSE, data: { peers } });
 
-// 소켓 가져오기
-const getSockets = () => sockets;
-
 /* ------------------------------------------- 못된 피어 다루기
  *
  * 지금까지는 피어가 무엇을 보내든 연결을 유지했다. 깨진 메시지도, 검증에서
@@ -280,7 +277,7 @@ const misbehaving = (ws, points, reason) => {
   banAddress(addressOf(ws), reason);
   try {
     ws.close();
-  } catch (e) {
+  } catch {
     // 이미 닫혔다
   }
   return true;
@@ -364,7 +361,7 @@ const initSocketConnection = ws => {
 const parseData = data => {
   try {
     return JSON.parse(data);
-  } catch(e) {
+  } catch {
     // 남이 보낸 것이 깨져 있는 것뿐이다. 스택을 뱉을 일이 아니다.
     console.log("피어가 보낸 메시지가 JSON 이 아닙니다");
     return null;
@@ -409,7 +406,7 @@ const handleSocketMessages = ws => {
       }
       try {
         ws.close();
-      } catch (e) {
+      } catch {
         // 이미 닫혔다
       }
       return;
@@ -595,7 +592,7 @@ const fillOutbound = () => {
     }
     try {
       connectToPeers(url);
-    } catch (e) {
+    } catch {
       // 상한 등. 다음에 다시 본다.
     }
   }
@@ -1092,7 +1089,7 @@ const isPeerUrl = url => {
   try {
     const { protocol } = new URL(url);
     return protocol === "ws:" || protocol === "wss:";
-  } catch (e) {
+  } catch {
     return false;
   }
 };

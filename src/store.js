@@ -54,7 +54,7 @@ const closeFd = () => {
   if (fd !== null) {
     try {
       fs.closeSync(fd);
-    } catch (e) {
+    } catch {
       // 이미 닫혔다
     }
     fd = null;
@@ -108,7 +108,7 @@ const readLines = (file, what) => {
   for (const line of lines) {
     try {
       parsed.push(JSON.parse(line));
-    } catch (e) {
+    } catch {
       console.log(
         `${what}의 ${parsed.length + 1}번째 줄이 깨져 있습니다. 여기까지만 복원합니다.`
       );
@@ -163,7 +163,7 @@ const scanBlocks = onBlock => {
           let parsed = null;
           try {
             parsed = JSON.parse(line);
-          } catch (e) {
+          } catch {
             console.log(`저장된 체인의 ${count + 1}번째 줄이 깨져 있습니다. 여기까지만 복원합니다.`);
             broken = true;
           }
@@ -221,7 +221,7 @@ const readBlockAt = height => {
   fs.readSync(readFd(), buffer, 0, length, from);
   try {
     return JSON.parse(buffer.toString("utf8").trim());
-  } catch (e) {
+  } catch {
     console.log(`저장된 블록 #${height} 을 읽을 수 없습니다.`);
     return null;
   }
@@ -320,7 +320,7 @@ const loadChainstate = () => {
   }
   try {
     return JSON.parse(fs.readFileSync(chainstatePath(), "utf8"));
-  } catch (e) {
+  } catch {
     console.log("chainstate 파일이 깨져 있습니다. 체인을 전부 재생합니다.");
     return null;
   }

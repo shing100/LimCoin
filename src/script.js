@@ -619,7 +619,7 @@ const describe = scriptHex => {
 const safeNum = buf => {
   try {
     return decodeNum(buf);
-  } catch (e) {
+  } catch {
     return null;
   }
 };
@@ -632,7 +632,7 @@ const cltvValue = ops => {
 const safeNum5 = buf => {
   try {
     return decodeNum(buf, 5);
-  } catch (e) {
+  } catch {
     return null;
   }
 };

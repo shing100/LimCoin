@@ -282,11 +282,23 @@ const readVarBytes = cursor => {
   return hex;
 };
 
-// varint 길이 + UTF-8
+/*
+ * varint 길이 + UTF-8.
+ *
+ * UTF-8 로 읽히지 않는 바이트가 있으면 거부한다. Buffer.toString("utf8") 은
+ * 그런 바이트를 U+FFFD 로 바꿔 주는데, 그 문자열을 다시 적으면 3바이트가 되어
+ * 원래 바이트와 달라진다 — 즉 왕복이 깨지고, 서로 다른 바이트가 같은
+ * 트랜잭션으로 읽힌다. 주소는 어차피 Base58(또는 공개키 hex) ASCII 라
+ * 잃는 것이 없다.
+ */
 const readVarString = cursor => {
   const length = readVarint(cursor);
   need(cursor, length);
-  const text = cursor.buf.subarray(cursor.at, cursor.at + length).toString("utf8");
+  const bytes = cursor.buf.subarray(cursor.at, cursor.at + length);
+  const text = bytes.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(bytes)) {
+    throw Error("문자열이 UTF-8 이 아닙니다");
+  }
   cursor.at += length;
   return text;
 };

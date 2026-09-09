@@ -13,7 +13,6 @@ const {
   collectConsumed,
   rollbackTxs,
   updateUTxOuts,
-  processTxs,
   createCoinbaseTx,
   getTxId
 } = require("../src/transactions");

@@ -35,7 +35,6 @@ const {
   addToMempool, getMempool, updateMempool, selectTxsForBlock,
   getSpendableUTxOuts, getMatureUTxOuts
 } = Mempool;
-const { indexByOutpoint } = require("./utxo");
 
 const BlOCK_GENERATION_INTERVAL = 10;  //  블록 생성 주기(초)
 // 헤더 version. 규칙을 바꿀 때 채굴자가 새 값을 적어 찬성을 표시하는 자리다.
@@ -1029,7 +1028,7 @@ const reinstateTxs = txs => {
     try {
       addToMempool(tx, snapshot, nextHeight(), tipMedianTime());
       restored++;
-    } catch (e) {
+    } catch {
       // 이미 다른 트랜잭션이 같은 UTxO 를 썼거나 유효하지 않게 된 경우
     }
   }
@@ -1056,7 +1055,7 @@ const restoreMempool = () => {
     try {
       addToMempool(tx, snapshot, nextHeight(), tipMedianTime());
       restored++;
-    } catch (e) {
+    } catch {
       // 이미 담겼거나 더는 유효하지 않다
     }
   }
