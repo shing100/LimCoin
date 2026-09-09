@@ -21,6 +21,8 @@ const NETWORKS = {
     name: "mainnet",
     // 0x30 -> 주소가 'L' 로 시작한다
     addressVersion: 0x30,
+    // 스크립트 주소(P2SH). 0x32 -> 'M'. 눈으로도 일반 주소와 갈린다.
+    scriptAddressVersion: 0x32,
     genesisFile: "./genesis.json",
     magic: "limcoin/main/1",
     defaultDataSubdir: "mainnet",
@@ -34,6 +36,8 @@ const NETWORKS = {
     name: "testnet",
     // 0x6f -> 'm' 또는 'n' (비트코인 테스트넷과 같다)
     addressVersion: 0x6f,
+    // 0xc4 -> '2' (비트코인 테스트넷 P2SH 와 같다)
+    scriptAddressVersion: 0xc4,
     genesisFile: "./genesis.testnet.json",
     magic: "limcoin/test/1",
     defaultDataSubdir: "testnet",
@@ -46,6 +50,7 @@ const NETWORKS = {
   regtest: {
     name: "regtest",
     addressVersion: 0x6f,
+    scriptAddressVersion: 0xc4,
     genesisFile: "./genesis.testnet.json",
     magic: "limcoin/regtest/1",
     defaultDataSubdir: "regtest",

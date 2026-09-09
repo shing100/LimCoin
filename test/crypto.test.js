@@ -166,15 +166,26 @@ test("트랜잭션 직렬화는 정해진 바이트 배열이고 서명·공개�
     "ab".repeat(32) + "01000000" + // txOutId, index=1 (LE)
     "01" +                       // 출력 1개
     "07" + Buffer.from("LimAddr").toString("hex") + // varstr 주소
-    "e803000000000000";          // 1000 (uint64 LE)
+    "e803000000000000" +         // 1000 (uint64 LE)
+    "00000000";                  // lockTime 0 (uint32 LE)
   assert.strictEqual(bytes.toString("hex"), expected);
   const stripped = { txIns: [{ txOutId: "ab".repeat(32), txOutIndex: 1 }], txOuts: tx.txOuts };
   assert.strictEqual(S.txIdOf(tx), S.txIdOf(stripped), "서명과 공개키는 id 에 영향이 없다");
+  assert.strictEqual(S.txIdOf(tx), S.txIdOf({ ...tx, lockTime: 0 }), "lockTime 은 0 이 기본이다");
+  assert.notStrictEqual(S.txIdOf(tx), S.txIdOf({ ...tx, lockTime: 1 }), "lockTime 은 id 에 들어간다");
+  assert.strictEqual(
+    S.txIdOf(tx),
+    S.txIdOf({ ...tx, txIns: [{ ...tx.txIns[0], unlock: ["aa"], redeemScript: "51" }] }),
+    "해제 데이터도 id 에 영향이 없다"
+  );
 });
 
 test("코인베이스의 빈 txOutId 는 0 32바이트로 직렬화된다", () => {
   const cb = { txIns: [{ txOutId: "", txOutIndex: 7 }], txOuts: [{ address: "a", amount: 1 }] };
   assert.ok(S.serializeTx(cb).toString("hex").startsWith("01" + "00".repeat(32) + "07000000"));
+  // lockTime 은 맨 뒤 uint32 다
+  assert.ok(S.serializeTx(cb).toString("hex").endsWith("00000000"));
+  assert.notStrictEqual(S.txIdOf(cb), S.txIdOf({ ...cb, lockTime: 7 }), "lockTime 은 txid 에 들어간다");
 });
 
 test("블록 헤더는 88바이트다", () => {

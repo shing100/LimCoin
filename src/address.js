@@ -18,6 +18,10 @@
  * 먼저 보고 그 공개키로 서명을 확인한다.
  *
  * 예전 형식(공개키 hex)도 받는다. 예전 키로 받아 둔 코인을 쓸 수 있어야 한다.
+ *
+ * 스크립트 주소(P2SH)는 공개키 대신 *조건(redeemScript)* 의 해시를 담는다.
+ * 버전 바이트만 다르고 만드는 법은 같다. 다중서명·타임락·HTLC 가 이 주소로
+ * 표현된다 (script.js).
  */
 const crypto = require("crypto");
 const { sha256d } = require("./serialization");
@@ -91,6 +95,12 @@ const hash160 = buf =>
 const addressFromPublicKey = (pubHex, version) =>
   base58CheckEncode(Buffer.concat([Buffer.from([version]), hash160(Buffer.from(pubHex, "hex"))]));
 
+// 스크립트(redeemScript hex) -> P2SH 주소
+const addressFromScript = (scriptHex, scriptVersion) =>
+  base58CheckEncode(
+    Buffer.concat([Buffer.from([scriptVersion]), hash160(Buffer.from(scriptHex, "hex"))])
+  );
+
 // 예전 형식: 비압축 공개키 hex 그대로
 const isLegacyAddress = address =>
   typeof address === "string" && /^04[0-9a-fA-F]{128}$/.test(address);
@@ -112,9 +122,26 @@ const isBase58Address = (address, version) => {
   return decoded !== null && decoded.version === version;
 };
 
-// 이 망에서 받을 수 있는 주소인가 (예전 형식 포함)
-const isAddressValid = (address, version) =>
-  isLegacyAddress(address) || isBase58Address(address, version);
+// 스크립트 주소인가 (그렇다면 20바이트 스크립트 해시를 돌려준다)
+const scriptHashOf = (address, scriptVersion) => {
+  const decoded = decodeAddress(address);
+  return decoded !== null && decoded.version === scriptVersion ? decoded.hash : null;
+};
+
+// 이 스크립트가 이 주소의 조건인가
+const scriptMatchesAddress = (address, scriptHex, scriptVersion) => {
+  const wanted = scriptHashOf(address, scriptVersion);
+  if (wanted === null || typeof scriptHex !== "string" || !/^([0-9a-fA-F]{2})*$/.test(scriptHex)) {
+    return false;
+  }
+  return wanted.equals(hash160(Buffer.from(scriptHex, "hex")));
+};
+
+// 이 망에서 받을 수 있는 주소인가 (예전 형식과 스크립트 주소 포함)
+const isAddressValid = (address, version, scriptVersion) =>
+  isLegacyAddress(address) ||
+  isBase58Address(address, version) ||
+  (scriptVersion !== undefined && isBase58Address(address, scriptVersion));
 
 // 이 공개키가 이 주소의 주인인가
 const addressMatchesPublicKey = (address, pubHex, version) => {
@@ -138,6 +165,9 @@ module.exports = {
   base58CheckDecode,
   hash160,
   addressFromPublicKey,
+  addressFromScript,
+  scriptHashOf,
+  scriptMatchesAddress,
   isLegacyAddress,
   isBase58Address,
   decodeAddress,

@@ -126,7 +126,7 @@ const getMatureUTxOuts = (uTxOutList, spendHeight) =>
  * 충분히 묻혔는지 보려면 필요하다 — 지금 mempool 에 넣어도 되는지는
  * "다음 블록에서 쓸 수 있는가"와 같은 물음이다.
  */
-const addToMempool = (tx, uTxOutList, spendHeight) => {
+const addToMempool = (tx, uTxOutList, spendHeight, mtp) => {
   if (mempool.length >= MAX_MEMPOOL_SIZE) {
     throw Error(`The mempool is full (${MAX_MEMPOOL_SIZE} txs). Try again later.`);
   }
@@ -141,7 +141,7 @@ const addToMempool = (tx, uTxOutList, spendHeight) => {
     throw Error("This tx is not valid for the pool. Will not add it.");
   }
   // 확정된 것뿐 아니라 mempool 이 만든 출력도 볼 수 있어야 한다
-  if (!validateTx(tx, getSpendableUTxOuts(uTxOutList), undefined, spendHeight)) {
+  if (!validateTx(tx, getSpendableUTxOuts(uTxOutList), undefined, spendHeight, mtp)) {
     throw Error("This tx is invalid. Will not add it to pool");
   }
   mempool.push(tx);

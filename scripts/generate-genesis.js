@@ -5,8 +5,9 @@
  *   node scripts/generate-genesis.js [--network ...] --rehash
  *
  * --rehash 는 기존 제네시스의 코인베이스(프리마인 주소, 금액, 타임스탬프)는
- * 그대로 두고 헤더만 지금 형식(version, bits)으로 다시 써서 해시를 새로
- * 만든다. 헤더 형식이 바뀌었을 때 프리마인 니모닉을 바꾸지 않고 쓴다.
+ * 그대로 두고 형식만 지금 것으로 다시 쓴다 — 트랜잭션 id, 머클 루트, 헤더
+ * 해시를 새 직렬화로 다시 계산한다. 형식이 바뀌었을 때 프리마인 니모닉을
+ * 바꾸지 않고 쓴다.
  *
  * - 새 니모닉을 만들어 첫 받는 주소로 프리마인(높이 0 보조금)을 받는 제네시스를
  *   src/genesis.json (메인넷) 또는 src/genesis.testnet.json (테스트넷) 에 쓴다.
@@ -50,6 +51,8 @@ const genesisLocation = path.join(__dirname, "..", "src", params.genesisFile);
 
 if (flag("--rehash")) {
   const existing = JSON.parse(fs.readFileSync(genesisLocation, "utf8"));
+  // 직렬화가 바뀌면 txid 도 바뀐다. 내용은 그대로 두고 id 만 다시 계산한다.
+  existing.data = existing.data.map(tx => ({ ...tx, id: getTxId({ ...tx, id: "" }) }));
   const rehashed = {
     version: GENESIS_VERSION,
     index: 0,

@@ -105,7 +105,7 @@ const genesisBlock = new Block(
 // 블록체인
 let blockchain = [genesisBlock];
 
-let uTxOuts = processTxs(blockchain[0].data, [], 0);
+let uTxOuts = processTxs(blockchain[0].data, [], 0, 0);
 AddressIndex.applyBlock(genesisBlock, []);
 ChainIndex.applyBlock(genesisBlock);
 
@@ -311,6 +311,13 @@ const isSpecialBlock = (i, chain) =>
 const findBits = () => bitsForNext(getBlockChain(), getTimestamp());
 
 /*
+ * mempool 에 넣을 때 쓰는 "지금 시각" — 내 시계가 아니라 체인 끝의 MTP 다.
+ * 시각 기반 lockTime 은 블록에 담길 때 MTP 로 판정되므로, 미리 볼 때도 같은
+ * 잣대를 써야 "받아 놓고 담지 못하는" 트랜잭션이 생기지 않는다.
+ */
+const tipMedianTime = () => medianTimePast(getBlockChain());
+
+/*
  * nonce 찾기를 워커 스레드에 맡긴다.
  *
  * 예전에는 메인 스레드에서 돌리되 일정 해시마다 이벤트 루프에 양보했다.
@@ -453,6 +460,9 @@ const findBlockInWorkers = (index, previousHash, timestamp, data, bits) => {
 // 타임스탬프 유효성 검사
 // 직전 MEDIAN_TIME_SPAN 블록 타임스탬프의 중앙값
 const medianTimePast = chain => {
+  if (chain.length === 0) {
+    return 0;
+  }
   const recent = chain
     .slice(-MEDIAN_TIME_SPAN)
     .map(block => block.timestamp)
@@ -685,7 +695,7 @@ const isChainValid = (candidateChain) => {
 
       // 재생하기 전의 집합에서 뽑아야 블록 안에서 만들어졌다 쓰인 출력이 빠진다
       const consumed = collectConsumed(currentBlock.data, working);
-      const processed = processTxs(currentBlock.data, working, currentBlock.index);
+      const processed = processTxs(currentBlock.data, working, currentBlock.index, medianTimePast(chain));
 
       if(processed === null){
         return null;
@@ -783,7 +793,7 @@ const reinstateTxs = txs => {
   let restored = 0;
   for (const tx of txs) {
     try {
-      addToMempool(tx, snapshot, nextHeight());
+      addToMempool(tx, snapshot, nextHeight(), tipMedianTime());
       restored++;
     } catch (e) {
       // 이미 다른 트랜잭션이 같은 UTxO 를 썼거나 유효하지 않게 된 경우
@@ -810,7 +820,7 @@ const restoreMempool = () => {
   let restored = 0;
   for (const tx of saved) {
     try {
-      addToMempool(tx, snapshot, nextHeight());
+      addToMempool(tx, snapshot, nextHeight(), tipMedianTime());
       restored++;
     } catch (e) {
       // 이미 담겼거나 더는 유효하지 않다
@@ -855,7 +865,9 @@ const addBlockToChain = candidateBlock => {
     const processedTxs = processTxs(
       candidateBlock.data,
       uTxOuts,
-      candidateBlock.index
+      candidateBlock.index,
+      // 시각 기반 lockTime 은 내 시계가 아니라 직전 11블록의 중앙값과 견준다
+      medianTimePast(blockchain)
     );
     if(processedTxs === null){
       console.log("Couldnt process txs");
@@ -960,7 +972,7 @@ const initChain = (dataDir) => {
 
   let chain = [persisted[0]];
   let undo = [collectConsumed(persisted[0].data, [])];
-  let utxos = processTxs(persisted[0].data, [], 0);
+  let utxos = processTxs(persisted[0].data, [], 0, 0);
 
   for (let i = 1; i < persisted.length; i++) {
     const block = persisted[i];
@@ -968,7 +980,7 @@ const initChain = (dataDir) => {
       console.log(`저장된 블록 #${block.index} 이 유효하지 않습니다. 여기까지만 복원합니다.`);
       break;
     }
-    const processed = processTxs(block.data, utxos, block.index);
+    const processed = processTxs(block.data, utxos, block.index, medianTimePast(chain));
     if (processed === null) {
       console.log(`저장된 블록 #${block.index} 의 트랜잭션을 처리할 수 없습니다. 여기까지만 복원합니다.`);
       break;
@@ -995,7 +1007,8 @@ const initChain = (dataDir) => {
 // 색인은 체인을 처음부터 재생해야 만들 수 있다.
 const rebuildIndexes = () => {
   AddressIndex.rebuild(blockchain, (block, before) =>
-    processTxs(block.data, before, block.index)
+    // 이미 검증해 둔 블록이지만 재생도 같은 규칙으로 한다 — 그 블록 앞까지의 MTP
+    processTxs(block.data, before, block.index, medianTimePast(blockchain.slice(0, block.index)))
   );
   ChainIndex.rebuild(blockchain);
 };
@@ -1056,7 +1069,7 @@ const sendTx = (address, amount, fee = 0) => {
     }
     throw e;
   }
-  addToMempool(tx, confirmed, nextHeight());
+  addToMempool(tx, confirmed, nextHeight(), tipMedianTime());
   require("./p2p").broadcastTx(tx);
   return tx;
 };
@@ -1082,7 +1095,7 @@ const submitTx = tx => {
   if (tx.id !== expectedId) {
     throw Error(`id 가 내용과 맞지 않습니다 (계산값 ${expectedId})`);
   }
-  addToMempool(tx, getUTxOutList(), nextHeight());
+  addToMempool(tx, getUTxOutList(), nextHeight(), tipMedianTime());
   require("./p2p").broadcastTx(tx);
   return { id: tx.id, pending: true };
 };
@@ -1106,7 +1119,7 @@ const handleIncomingTxs = txs => {
   const snapshot = getUTxOutList();
   for (const tx of txs) {
     try {
-      addToMempool(tx, snapshot, nextHeight());
+      addToMempool(tx, snapshot, nextHeight(), tipMedianTime());
     } catch (e) {
       console.log(`피어가 보낸 트랜잭션을 받지 못했습니다: ${e.message}`);
     }

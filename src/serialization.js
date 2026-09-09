@@ -97,6 +97,11 @@ const writeString = s => {
  *   입력마다: 32바이트 txOutId, uint32 txOutIndex
  *   varint 출력 수
  *   출력마다: varstr 주소, uint64 금액
+ *   uint32 lockTime
+ *
+ * lockTime 은 "이 높이(또는 시각)가 되어야 블록에 담길 수 있다"이다. 0 이면
+ * 제한이 없다. 스크립트의 OP_CHECKLOCKTIMEVERIFY 가 이 값을 본다.
+ * 해제 데이터(서명, 공개키, redeemScript, unlock)는 여전히 들어가지 않는다.
  */
 const serializeTx = tx => {
   const parts = [writeVarint(tx.txIns.length)];
@@ -107,6 +112,7 @@ const serializeTx = tx => {
   for (const txOut of tx.txOuts) {
     parts.push(writeString(txOut.address), writeUInt64(txOut.amount));
   }
+  parts.push(writeUInt32(tx.lockTime || 0));
   return Buffer.concat(parts);
 };
 

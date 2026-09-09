@@ -3,6 +3,7 @@ const _ = require("lodash");
 const Keys = require("./keys");
 const Address = require("./address");
 const Params = require("./params");
+const Script = require("./script");
 const { txIdOf } = require("./serialization");
 const { COIN } = require("./units");
 const { keyOf, outpointKey, indexByOutpoint } = require("./utxo");
@@ -174,6 +175,8 @@ const getPublicKey = privateKey => Keys.getPublicKey(privateKey);
 
 // 이 노드가 속한 망의 주소 버전 바이트
 const addressVersion = () => Params.current().addressVersion;
+// 스크립트 주소(P2SH) 버전 바이트
+const scriptAddressVersion = () => Params.current().scriptAddressVersion;
 
 const updateUTxOuts = (newTxs, uTxOutList, blockIndex = null) => {
   const newUTxOuts = newTxs
@@ -229,6 +232,15 @@ const isTxInStructureValid = txIn => {
   } else if (txIn.publicKey !== undefined && typeof txIn.publicKey !== "string") {
     console.log("The txIn's publicKey is not a string");
     return false;
+  } else if (txIn.redeemScript !== undefined && typeof txIn.redeemScript !== "string") {
+    console.log("The txIn's redeemScript is not a string");
+    return false;
+  } else if (
+    txIn.unlock !== undefined &&
+    (!Array.isArray(txIn.unlock) || txIn.unlock.some(item => typeof item !== "string"))
+  ) {
+    console.log("The txIn's unlock is not an array of hex strings");
+    return false;
   } else {
     return true;
   }
@@ -243,7 +255,7 @@ const isTxInStructureValid = txIn => {
  * 주소로 메인넷 코인을 보낼 수 없다.
  */
 const isAddressValid = address => {
-  if (!Address.isAddressValid(address, addressVersion())) {
+  if (!Address.isAddressValid(address, addressVersion(), scriptAddressVersion())) {
     console.log("The address is not valid for this network");
     return false;
   }
@@ -281,6 +293,12 @@ const isTxStructureValid = tx => {
   if (typeof tx.id !== "string") {
     console.log("Tx ID is not valid");
     return false;
+  } else if (
+    tx.lockTime !== undefined &&
+    (!Number.isInteger(tx.lockTime) || tx.lockTime < 0 || tx.lockTime > 0xffffffff)
+  ) {
+    console.log("The tx lockTime is not a uint32");
+    return false;
   } else if (!(tx.txIns instanceof Array)) {
     console.log("The txIns are not an array");
     return false;
@@ -302,7 +320,7 @@ const isTxStructureValid = tx => {
   }
 };
 
-const validateTxIn = (txIn, tx, uTxOuts, spendHeight) => {
+const validateTxIn = (txIn, tx, uTxOuts, spendHeight, mtp) => {
   const wantedTxOut = findUTxOut(txIn.txOutId, txIn.txOutIndex, uTxOuts);
   if (wantedTxOut === undefined) {
     console.log(`Didn't find the wanted uTxOut, the tx: ${tx} is invalid`);
@@ -322,6 +340,30 @@ const validateTxIn = (txIn, tx, uTxOuts, spendHeight) => {
      * 확인한다. 둘 중 하나라도 어긋나면 남의 코인이다.
      */
     const address = wantedTxOut.address;
+
+    /*
+     * 스크립트 주소(P2SH)면 조건이 주소에 해시로만 들어 있다. 원본
+     * (redeemScript)을 입력에 실어 보내야 하고, 그 해시가 주소와 맞아야
+     * 하며, unlock 데이터로 그 스크립트를 통과시켜야 한다.
+     */
+    if (Address.scriptHashOf(address, scriptAddressVersion()) !== null) {
+      if (!Address.scriptMatchesAddress(address, txIn.redeemScript, scriptAddressVersion())) {
+        console.log("The txIn's redeemScript does not match the referenced script address");
+        return false;
+      }
+      const passed = Script.run(txIn.unlock || [], txIn.redeemScript, {
+        txId: tx.id,
+        lockTime: tx.lockTime || 0,
+        spendHeight,
+        medianTimePast: mtp
+      });
+      if (!passed) {
+        console.log("The txIn's unlock data does not satisfy the redeemScript");
+        return false;
+      }
+      return true;
+    }
+
     const publicKey = Address.isLegacyAddress(address) ? address : txIn.publicKey;
     if (!Address.addressMatchesPublicKey(address, publicKey, addressVersion())) {
       console.log("The txIn's public key does not belong to the referenced address");
@@ -333,6 +375,29 @@ const validateTxIn = (txIn, tx, uTxOuts, spendHeight) => {
     }
     return true;
   }
+};
+
+/*
+ * lockTime — "이 높이(또는 시각)가 되어야 블록에 담길 수 있다".
+ *
+ * 0 이면 제한이 없다. LOCKTIME_THRESHOLD(5억) 미만이면 블록 높이로,
+ * 그 이상이면 유닉스 시각으로 읽는다. 시각은 내 시계가 아니라 직전 11블록의
+ * 중앙값(MTP)과 견준다 — 채굴자가 시계를 앞당겨 남의 타임락을 일찍 열지
+ * 못하게 하려는 것이다.
+ *
+ * 비트코인은 "lockTime < 높이" 일 때 담을 수 있다(sequence 로 끄는 길도 있다).
+ * 여기에는 sequence 가 없고, "lockTime <= 높이" 로 둔다 — lockTime 100 이면
+ * 100번 블록부터. 읽는 대로 동작하는 쪽을 골랐다.
+ */
+const isFinalTx = (tx, spendHeight, mtp) => {
+  const lockTime = tx.lockTime || 0;
+  if (lockTime === 0) {
+    return true;
+  }
+  if (lockTime < Script.LOCKTIME_THRESHOLD) {
+    return typeof spendHeight === "number" && lockTime <= spendHeight;
+  }
+  return typeof mtp === "number" && lockTime <= mtp;
 };
 
 const getAmountInTxIn = (txIn, uTxOuts) => {
@@ -360,7 +425,7 @@ const getTxFee = (tx, uTxOuts) => sumTxIns(tx, uTxOuts) - sumTxOuts(tx);
 
 // 블록 단위로 검증할 때는 색인을 한 번만 만들어 돌려 쓴다.
 // 낱개로 부를 때는 기본값이 알아서 만든다(기본 인자는 필요할 때만 계산된다).
-const validateTx = (tx, uTxOutList, uTxOuts = indexByOutpoint(uTxOutList), spendHeight) => {
+const validateTx = (tx, uTxOutList, uTxOuts = indexByOutpoint(uTxOutList), spendHeight, mtp) => {
   if (!isTxStructureValid(tx)) {
     console.log("Tx structure is invalid");
     return false;
@@ -371,8 +436,16 @@ const validateTx = (tx, uTxOutList, uTxOuts = indexByOutpoint(uTxOutList), spend
     return false;
   }
 
+  if (!isFinalTx(tx, spendHeight, mtp)) {
+    console.log(
+      `The tx ${tx.id} is time-locked until ${tx.lockTime} ` +
+        `(height ${spendHeight}, median time ${mtp})`
+    );
+    return false;
+  }
+
   const hasValidTxIns = tx.txIns
-    .map(txIn => validateTxIn(txIn, tx, uTxOuts, spendHeight))
+    .map(txIn => validateTxIn(txIn, tx, uTxOuts, spendHeight, mtp))
     .every(isValid => isValid === true);
 
   if (!hasValidTxIns) {
@@ -394,6 +467,9 @@ const validateCoinbaseTx = (tx, blockIndex, totalFees = 0) => {
   const expected = getBlockSubsidy(blockIndex) + totalFees;
   if (getTxId(tx) !== tx.id) {
     console.log("Invalid Coinbase tx ID");
+    return false;
+  } else if (tx.lockTime) {
+    console.log("Coinbase TX must not be time-locked");
     return false;
   } else if (tx.txIns.length !== 1) {
     console.log("Coinbase TX should only have one input");
@@ -484,7 +560,7 @@ const sumBlockFees = (txs, uTxOutList) => {
   return total;
 };
 
-const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
+const validateBlockTxs = (txs, uTxOutList, blockIndex, mtp) => {
   if (!(txs instanceof Array) || txs.length === 0) {
     console.log("A block must contain at least a coinbase tx");
     return false;
@@ -531,7 +607,7 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
   const uTxOuts = indexByOutpoint(uTxOutList);
   let totalFees = 0;
   for (const tx of nonCoinbaseTxs) {
-    if (!validateTx(tx, uTxOutList, uTxOuts, blockIndex)) {
+    if (!validateTx(tx, uTxOutList, uTxOuts, blockIndex, mtp)) {
       console.log(`The tx ${tx.id} in this block is invalid`);
       return false;
     }
@@ -549,8 +625,8 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex) => {
 };
 
 // Tx 프로세스
-const processTxs = (txs, uTxOutList, blockIndex) => {
-  if (!validateBlockTxs(txs, uTxOutList, blockIndex)) {
+const processTxs = (txs, uTxOutList, blockIndex, mtp) => {
+  if (!validateBlockTxs(txs, uTxOutList, blockIndex, mtp)) {
     return null;
   }
   return updateUTxOuts(txs, uTxOutList, blockIndex);
@@ -622,6 +698,8 @@ module.exports = {
   COINBASE_MATURITY,
   isCoinbaseTx,
   isSpendable,
+  isFinalTx,
+  scriptAddressVersion,
   getTxId,
   signTxIn,
   TxIn,

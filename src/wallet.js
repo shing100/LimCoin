@@ -22,6 +22,7 @@ const path = require("path"),
 const { keyOf, outpointKey } = require("./utxo");
 
 const Address = require("./address");
+const Keys = require("./keys");
 
 const {
   getPublicKey,
@@ -183,7 +184,38 @@ const getAllKeys = () => {
     keys.push({ kind: "imported", index: null, privateKey, address: getPublicKey(privateKey) });
     keys.push({ kind: "imported", index: null, privateKey, address: addressOf(privateKey) });
   }
-  return keys;
+  return keys.map(key => ({ ...key, publicKey: getPublicKey(key.privateKey) }));
+};
+
+// 이 지갑이 가진 공개키들 (중복 제거). 다중서명 주소를 만들 때 남에게 준다.
+const getPublicKeys = () => [...new Set(getAllKeys().map(key => key.publicKey))];
+
+/*
+ * 지갑의 키로 txid 에 서명한다.
+ *
+ * 다중서명이나 HTLC 는 노드가 대신 만들어 줄 수 없다 — 어떤 갈래로 풀지,
+ * 누가 몇 번째 서명을 넣을지는 사람이 정한다. 그래서 "이 txid 에 이 공개키로
+ * 서명해 달라"만 해 주고, 해제 데이터를 짜 맞추는 것은 부르는 쪽에 맡긴다.
+ *
+ * publicKey 를 주지 않으면 지갑에 키가 하나뿐일 때만 그것으로 서명한다.
+ */
+const signMessage = (messageHex, publicKey) => {
+  if (typeof messageHex !== "string" || !/^[0-9a-f]{64}$/i.test(messageHex)) {
+    throw Error("서명할 대상은 32바이트 hex(txid)여야 합니다");
+  }
+  const keys = getAllKeys();
+  const candidates =
+    publicKey === undefined
+      ? [...new Map(keys.map(key => [key.publicKey, key])).values()]
+      : keys.filter(key => key.publicKey === publicKey);
+  if (candidates.length === 0) {
+    throw Error("이 지갑에 그 공개키가 없습니다");
+  }
+  if (candidates.length > 1) {
+    throw Error("지갑에 키가 여러 개입니다. publicKey 를 지정하세요 (GET /me/publickeys)");
+  }
+  const key = candidates[0];
+  return { publicKey: key.publicKey, signature: Keys.sign(key.privateKey, messageHex) };
 };
 
 const getAddresses = () => getAllKeys().map(key => key.address);
@@ -474,6 +506,8 @@ const createTx = (receiverAddress, amount, uTxOutList, memPool, fee = 0) => {
 
 module.exports = {
   initWallet,
+  getPublicKeys,
+  signMessage,
   getSeed,
   getWallet,
   getMnemonic,
