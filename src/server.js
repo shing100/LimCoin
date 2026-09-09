@@ -12,6 +12,8 @@ const express = require("express"),
     ChainIndex = require("./chainIndex"),
     Params = require("./params"),
     Target = require("./target"),
+    Transport = require("./transport"),
+    Store = require("./store"),
     crypto = require("crypto");
 
 const {
@@ -196,6 +198,14 @@ app.route("/blocks").get((req, res) => {
  * 목록은 공개다(누가 막혔는지는 비밀이 아니다). 푸는 것은 지갑 토큰을
  * 요구한다 — 아무나 풀 수 있으면 밴이 의미가 없다.
  */
+/*
+ * 피어마다 암호화가 걸렸는지, 상대 노드 id 가 무엇인지.
+ * 주소에 #<id> 를 붙여 두면 그 신원이 맞는지 확인하고 붙는다.
+ */
+app.get("/peers/detail", (req, res) => {
+  res.send(P2P.getPeerInfo());
+});
+
 app.route("/peers/banned")
   .get((req, res) => {
     res.send(P2P.getBanned());
@@ -826,6 +836,8 @@ app.get("/info", (req, res) => {
     network: Params.current().name,
     addressVersion: Params.current().addressVersion,
     scriptAddressVersion: Params.current().scriptAddressVersion,
+    nodeId: Transport.nodeId(),
+    encryption: Transport.mode(),
     genesisHash: getBlockChain()[0].hash,
     chainWork: chainWork(getBlockChain()).toString(),
     walletEnabled: Wallet.isEnabled(),
@@ -904,6 +916,13 @@ const start = (port = PORT, options = {}) => {
   if (restored > 0) {
     console.log(`저장된 체인을 복원했습니다: 블록 ${restored}개 (높이 ${height})`);
   }
+
+  /*
+   * 노드 신원키. 데이터 디렉터리의 node_key 에 남는다.
+   * 이 공개키가 노드 id 이고, 피어 주소에 #<id> 로 붙이면 고정할 수 있다.
+   */
+  const nodeId = Transport.loadIdentity(Store.currentDir());
+  console.log(`노드 id ${nodeId} (전송 암호화: ${Transport.mode()})`);
 
   const server = app.listen(port, () =>
     console.log("LimCoin Server running ON", port)
