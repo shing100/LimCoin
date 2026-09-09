@@ -193,9 +193,11 @@ const headerRecordOf = (block, height) => {
 };
 
 // 헤더 기록으로 이루어진 체인을 만든다. 본문이 있는 것은 캐시에 넣어 둔다.
-const toHeaderChain = blocks =>
-  blocks.map((block, height) => {
+const toHeaderChain = (blocks, from = 0) =>
+  blocks.map((block, at) => {
+    const height = from + at;
     const own = Object.getOwnPropertyDescriptor(block, "data");
+    // getter 면 캐시에 넣지 않는다 — 넣으면 undefined 를 굳혀 버릴 수 있다
     if (own !== undefined && own.get === undefined) {
       cacheBody(height, block.data);
     }
@@ -765,6 +767,10 @@ const trimUndoLog = () => {
  * 체크포인트 — 그 높이의 블록은 반드시 정해진 해시여야 한다 (params.js).
  * 그 높이보다 앞을 다시 쓰는 체인은 아무리 무거워도 받지 않는다.
  */
+// 못박아 둔 가장 높은 높이 (없으면 -1)
+const lastCheckpointHeight = () =>
+  Params.current().checkpoints.reduce((highest, [height]) => Math.max(highest, height), -1);
+
 const violatesCheckpoint = block => {
   for (const [height, hash] of Params.current().checkpoints) {
     if (block.index === height && block.hash !== hash) {
@@ -819,6 +825,21 @@ const isChainValid = (candidateChain) => {
      * 우리가 이미 깊이 쌓은 자리를 다시 쓰려는 체인은 받지 않는다.
      * 무게만 보면 이기는 체인이라도 그렇다 (MAX_REORG_DEPTH).
      */
+    /*
+     * 체크포인트보다 앞에서 갈라지는 체인은 받지 않는다.
+     *
+     * 블록마다 보는 검사(violatesCheckpoint)만으로는 모자란다 — 체크포인트
+     * 높이에 아예 블록이 없는(그보다 짧은) 체인은 그 검사를 지나쳐 버리고,
+     * 무게만 무거우면 못박아 둔 블록을 지워 버릴 수 있다.
+     */
+    const checkpoint = lastCheckpointHeight();
+    if (checkpoint >= 0 && common <= checkpoint && blockchain.length > checkpoint) {
+      console.log(
+        `체크포인트(높이 ${checkpoint})보다 앞(${common})에서 갈라지는 체인입니다. 받지 않습니다.`
+      );
+      return null;
+    }
+
     const rewindDepth = blockchain.length - common;
     if (MAX_REORG_DEPTH > 0 && rewindDepth > MAX_REORG_DEPTH) {
       console.log(
@@ -868,75 +889,111 @@ const chainWork = anyBlockchain =>
 // 블록체인 재배치
 const replaceChain = candidateChain => {
   const validated = isChainValid(candidateChain);
-  /*
-   * 무게는 검증을 마친 체인으로 잰다. 앞부분은 해시가 같아 검증을 건너뛴
-   * *우리* 블록이므로 상대가 그 자리의 difficulty 를 부풀려 보내도 소용없다.
-   * 후보 배열을 그대로 재면 그게 가능했다.
-   */
-  if(
-    validated !== null &&
-    chainWork(validated.chain) > chainWork(getBlockChain())
-  ){
-    // 되돌려지는 블록에 담겼던 트랜잭션은 아직 유효할 수 있다.
-    // 예전에는 그대로 사라져 버렸다.
-    const orphaned = collectOrphanedTxs(blockchain, validated.chain);
-
-    /*
-     * 주소 색인도 갈라진 지점까지만 되감고 새 블록만 얹는다.
-     * 예전에는 체인 전체를 다시 색인했다 — 한두 블록 갈라지자고
-     * 만 블록을 다시 훑는 셈이었다.
-     */
-    const droppedFrom =
-      validated.common < blockchain.length ? blockchain[validated.common].index : null;
-    /*
-     * 밀려나는 블록의 본문은 지금 확정해 둔다.
-     *
-     * 헤더 기록의 data 는 "그 높이의 본문"을 읽는 getter 다. 체인을 갈아
-     * 끼우고 나면 같은 높이에 새 블록이 앉으므로, 나중에 읽으면 새 블록의
-     * 본문이 나온다 — 색인에서 지울 트랜잭션을 엉뚱하게 고르게 된다.
-     */
-    const dropped = blockchain.slice(validated.common).map(block => ({ ...block }));
-
-    /*
-     * 저장소는 갈라진 지점에서 잘라 내고 새 블록만 이어 붙인다. 예전에는
-     * 파일을 통째로 다시 썼다 — 한두 블록 갈라지자고 만 블록을 다시 쓰는
-     * 셈이었다.
-     *
-     * 본문이 아직 손에 있는 지금 쓴다. 헤더 기록으로 바꾼 뒤에 쓰려 하면
-     * 캐시에서 밀려난 본문을 디스크에서 찾게 되는데, 그 자리는 방금 잘라
-     * 냈으므로 없다.
-     */
-    Store.truncateBlocksTo(validated.common);
-    for (let i = validated.common; i < validated.chain.length; i++) {
-      Store.appendBlock(validated.chain[i]);
-    }
-    // 갈아 끼웠으니 예전 스냅샷은 더 이상 이 체인의 것이 아니다
-    Store.dropChainstate();
-
-    blockchain = toHeaderChain(validated.chain);
-    uTxOuts = validated.uTxOuts;
-    undoLog = validated.undo;
-    trimUndoLog();
-
-    if (droppedFrom !== null) {
-      AddressIndex.rollbackTo(droppedFrom);
-      ChainIndex.rollbackBlocks(dropped);
-    }
-    let indexed = validated.uTxOutsAtCommon;
-    for (let i = validated.common; i < blockchain.length; i++) {
-      AddressIndex.applyBlock(blockchain[i], indexed);
-      ChainIndex.applyBlock(blockchain[i]);
-      // 서명 검증은 isChainValid 에서 끝났으므로 여기서는 반영만 한다
-      indexed = updateUTxOuts(blockchain[i].data, indexed, blockchain[i].index);
-    }
-
-    updateMempool(uTxOuts);
-    reinstateTxs(orphaned);
-    require('./p2p').broadcastNewBlock();
-    return true;
-  }else{
+  if (validated === null) {
     return false;
   }
+  const { common } = validated;
+
+  /*
+   * 무게는 갈라진 지점 뒤만 견준다.
+   *
+   * 앞부분은 두 체인이 같은 블록이므로 더해 봐야 양쪽에서 지워진다. 전부
+   * 더하면 replaceChain 한 번에 체인 길이만큼 256비트 나눗셈을 하게 되고,
+   * 그건 지는 갈래를 계속 들이미는 피어에게 좋은 먹잇감이다.
+   *
+   * 앞부분을 *우리* 블록으로 재는 것은 그대로다 — 상대가 그 자리의 난이도를
+   * 부풀려 보내도 소용없다(isChainValid 가 우리 블록으로 채워 준다).
+   */
+  const ourWork = chainWork(blockchain.slice(common));
+  const theirWork = chainWork(validated.chain.slice(common));
+  if (theirWork <= ourWork) {
+    return false;
+  }
+
+  /*
+   * 되돌려지는 블록에 담겼던 트랜잭션은 아직 유효할 수 있다. 예전에는
+   * 그대로 사라져 버렸다. 갈라진 지점 뒤만 보면 된다 — 앞부분은 두 체인에
+   * 모두 있으므로 고아가 될 수 없다.
+   */
+  const orphaned = collectOrphanedTxs(blockchain.slice(common), validated.chain.slice(common));
+
+  /*
+   * 색인을 먼저 되감는다.
+   *
+   * 헤더 기록의 data 는 "그 높이의 본문"을 읽는 getter 다. 체인을 갈아
+   * 끼우고 나면 같은 높이에 새 블록이 앉으므로, 나중에 읽으면 새 블록의
+   * 본문이 나온다 — 색인에서 지울 트랜잭션을 엉뚱하게 고르게 된다.
+   * 아직 옛 체인이 살아 있는 지금 해 두면 본문을 복사해 둘 필요가 없다.
+   */
+  if (common < blockchain.length) {
+    AddressIndex.rollbackTo(blockchain[common].index);
+    ChainIndex.rollbackBlocks(blockchain.slice(common));
+  }
+
+  /*
+   * 새 블록의 본문을 손에 쥔다.
+   *
+   * 뒤에서 파일을 자를 것이므로, 자른 뒤에는 디스크에서 읽을 수 없다.
+   * 후보 배열에 우리 헤더 기록이 섞여 있어도(부르는 쪽이 그렇게 만들 수
+   * 있다) 여기서 값으로 굳으므로 안전하다.
+   */
+  const appended = validated.chain.slice(common).map(block => ({ ...block }));
+
+  /*
+   * 저장소는 갈라진 지점에서 잘라 내고 새 블록만 이어 붙인다. 예전에는
+   * 파일을 통째로 다시 썼다 — 한두 블록 갈라지자고 만 블록을 다시 쓰는
+   * 셈이었다.
+   *
+   * 디스크가 말을 듣지 않으면(공간 부족 등) 메모리와 파일이 어긋난 채로
+   * 남는다. 그때는 파일을 진실로 삼아 다시 읽어 들인다 — 그러지 않으면
+   * 노드는 디스크에 없는 체인을 계속 내주게 된다.
+   */
+  try {
+    Store.truncateBlocksTo(common);
+    // 잘라 낸 자리 위의 본문 캐시도 함께 버린다 (없는 블록의 본문이다)
+    for (const height of [...bodyCache.keys()]) {
+      if (height >= common) {
+        bodyCache.delete(height);
+      }
+    }
+    for (const block of appended) {
+      Store.appendBlock(block);
+    }
+  } catch (e) {
+    console.log(`체인을 저장하지 못했습니다: ${e.message}. 저장된 체인으로 되돌립니다.`);
+    Store.dropChainstate();
+    initChain(Store.currentDir());
+    return false;
+  }
+
+  /*
+   * 갈라진 지점 앞은 이미 들고 있던 헤더 기록 그대로다. 전체를 다시 감싸면
+   * 되감기 값이 갈라진 깊이가 아니라 체인 길이에 비례하게 된다 — undo
+   * 데이터를 둔 이유가 사라진다. 새 블록만 감싼다.
+   */
+  blockchain = validated.chain.slice(0, common).concat(toHeaderChain(appended, common));
+  uTxOuts = validated.uTxOuts;
+  undoLog = validated.undo;
+  trimUndoLog();
+
+  let indexed = validated.uTxOutsAtCommon;
+  for (let i = common; i < blockchain.length; i++) {
+    AddressIndex.applyBlock(blockchain[i], indexed);
+    ChainIndex.applyBlock(blockchain[i]);
+    // 서명 검증은 isChainValid 에서 끝났으므로 여기서는 반영만 한다
+    indexed = updateUTxOuts(blockchain[i].data, indexed, blockchain[i].index);
+  }
+
+  /*
+   * 갈아 끼운 체인의 스냅샷을 남긴다. 버리기만 하면, 다음 스냅샷(500블록마다)
+   * 전에 노드가 갑자기 죽었을 때 제네시스부터 전부 다시 검증하게 된다.
+   */
+  persistChainstate();
+
+  updateMempool(uTxOuts);
+  reinstateTxs(orphaned);
+  require('./p2p').broadcastNewBlock();
+  return true;
 };
 /*
  * 체인이 교체될 때, 밀려난 블록에만 있던 트랜잭션을 추린다.
