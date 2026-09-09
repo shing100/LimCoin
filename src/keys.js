@@ -67,7 +67,7 @@ const isValidPublicKey = pubHex => {
     // 곡선 위의 점인지는 OpenSSL 이 확인한다
     crypto.ECDH.convertKey(pubHex, CURVE, "hex", "hex", "compressed");
     return true;
-  } catch (e) {
+  } catch {
     return false;
   }
 };
@@ -142,7 +142,7 @@ const encodeDer = (r, s) => {
 const isLowS = sigHex => {
   try {
     return parseDer(sigHex).s <= HALF_ORDER;
-  } catch (e) {
+  } catch {
     return false;
   }
 };
@@ -185,7 +185,7 @@ const verify = (pubHex, messageHex, sigHex) => {
       { key: publicKeyObject(pubHex), dsaEncoding: "der" },
       Buffer.from(sigHex, "hex")
     );
-  } catch (e) {
+  } catch {
     return false;
   }
 };

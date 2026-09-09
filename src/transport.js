@@ -94,7 +94,7 @@ const loadIdentity = dir => {
     });
     try {
       fs.chmodSync(file, 0o600);
-    } catch (e) {
+    } catch {
       // 권한 개념이 없는 파일 시스템이면 넘어간다
     }
   }
@@ -139,7 +139,7 @@ const startSession = (ws, network, onFallback) => {
         console.log("암호화 핸드셰이크가 오지 않아 끊습니다 (LIMCOIN_ENCRYPT=required)");
         try {
           ws.close();
-        } catch (e) {
+        } catch {
           // 이미 닫혔다
         }
       }
@@ -202,7 +202,7 @@ const acceptHandshake = (ws, data, network, expectedId) => {
       publicFrom("Ed25519", data.id),
       Buffer.from(data.sig, "hex")
     );
-  } catch (e) {
+  } catch {
     return false;
   }
   if (!ok) {

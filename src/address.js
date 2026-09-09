@@ -76,7 +76,7 @@ const base58CheckDecode = str => {
   let full;
   try {
     full = base58Decode(str);
-  } catch (e) {
+  } catch {
     return null;
   }
   if (full.length < 5) {

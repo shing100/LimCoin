@@ -18,9 +18,18 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "test": "node --test test/*.test.js",
-    "genesis": "node scripts/generate-genesis.js"
+    "genesis": "node scripts/generate-genesis.js",
+    "coverage": "node --experimental-test-coverage --test test/*.test.js",
+    "lint": "eslint .",
+    "fuzz": "node --test test/fuzz.test.js",
+    "vectors": "node scripts/vectors.js",
+    "release": "node scripts/release.js"
   },
   "devDependencies": {
+    "eslint": "^9.0.0",
     "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

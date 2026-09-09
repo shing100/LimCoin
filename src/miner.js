@@ -17,7 +17,10 @@ let loopPromise = null;
 let mined = 0;
 let lastError = null;
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = ms =>
+  new Promise(resolve => {
+    setTimeout(resolve, ms);
+  });
 
 const loop = async () => {
   while (running) {
@@ -52,8 +55,13 @@ const stop = async () => {
     return false;
   }
   running = false;
-  await loopPromise; // 진행 중인 블록을 마저 끝낸다
-  loopPromise = null;
+  // 기다리는 사이에 다시 start() 가 불릴 수 있다. 그때 새로 생긴 루프를
+  // 지우면 다음 stop() 이 아무것도 기다리지 않고 돌아온다.
+  const stopping = loopPromise;
+  await stopping; // 진행 중인 블록을 마저 끝낸다
+  if (loopPromise === stopping) {
+    loopPromise = null;
+  }
   console.log("자동 채굴을 멈췄습니다");
   return true;
 };

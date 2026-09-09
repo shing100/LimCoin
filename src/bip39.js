@@ -106,7 +106,7 @@ const validateMnemonic = mnemonic => {
   try {
     mnemonicToEntropy(mnemonic);
     return true;
-  } catch (e) {
+  } catch {
     return false;
   }
 };

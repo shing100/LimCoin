@@ -42,6 +42,90 @@ GET /metrics  → Prometheus (limcoin_height, limcoin_peers, limcoin_tip_age_sec
 
 `tipAge` 가 계속 커지면 블록이 안 들어오는 것이다 — 피어가 끊겼거나 망이 멈춘 것.
 
+## 1.5 두 가지 연동 방식 — REST 와 JSON-RPC
+
+같은 노드가 두 얼굴을 갖는다. 필요한 쪽을 쓰면 된다.
+
+| | REST (`/blocks`, `/transactions` …) | JSON-RPC (`POST /rpc`) |
+|---|---|---|
+| 모양 | 이 프로젝트 고유 | 비트코인 코어와 같은 메서드 이름·응답 |
+| 쓸 곳 | 새로 짜는 연동, 익스플로러, 지갑 | 이미 비트코인용으로 만들어 둔 도구 |
+| 인증 | 지갑 엔드포인트만 토큰 | 지갑 메서드만 토큰 |
+
+기존 도구가 `getblockcount`, `sendrawtransaction`, `gettxout` 을 부르게 되어
+있다면 엔드포인트만 이쪽으로 돌리면 대체로 그대로 돈다.
+
+```bash
+curl -s localhost:3000/rpc -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo"}'
+# {"result":{"chain":"mainnet","blocks":1204,…},"error":null,"id":1}
+```
+
+- 규약은 JSON-RPC 2.0 이다. `params` 는 배열(위치)로도 객체(이름)로도 준다.
+  배열로 여러 요청을 한 번에 보내면 같은 순서로 배열이 온다.
+- **HTTP 상태는 언제나 200 이다.** 성공·실패는 본문의 `error` 로 판단한다
+  (배치 하나하나가 따로 실패할 수 있어 상태 코드로 표현할 수 없다).
+- 오류 코드는 비트코인 코어의 것을 쓴다:
+  `-5` 모르는 해시/주소, `-8` 파라미터가 틀림, `-26` 규칙 위반으로 거절,
+  `-27` 이미 아는 트랜잭션, `-4` 지갑 문제(토큰 없음 포함),
+  `-13` 지갑이 잠김, `-32601` 모르는 메서드.
+- 금액은 **LIM 소수**다(비트코인이 BTC 를 쓰는 것과 같다). REST 는 최소
+  단위(lm) 정수를 쓴다. 두 쪽을 같이 쓰면 이 차이를 꼭 맞춰라.
+- `help` 를 부르면 등록된 메서드 목록이 온다.
+
+### 있는 메서드
+
+**체인** `getblockcount` `getbestblockhash` `getblockhash` `getblock`
+`getblockheader` `getblockchaininfo` `getdifficulty` `getchaintips`
+
+**트랜잭션** `getrawtransaction` `decoderawtransaction` `sendrawtransaction`
+`gettxout` `validateaddress`
+
+**mempool·수수료** `getrawmempool` `getmempoolinfo` `estimatesmartfee`
+
+**망** `getconnectioncount` `getnetworkinfo` `getpeerinfo` `uptime` `help`
+
+**지갑 (토큰 필요)** `getwalletinfo` `getnewaddress` `getbalance`
+`sendtoaddress` `listunspent` `listtransactions` `walletpassphrase`
+`walletlock`
+
+지갑 메서드는 `Authorization: Bearer <LIMCOIN_WALLET_TOKEN>` 이 있어야 한다.
+없으면 `-4` 다. `LIMCOIN_WALLET=off` 로 띄운 노드에서는 토큰이 맞아도 `-4` —
+그 노드에는 키가 없다.
+
+### 비트코인과 다른 점
+
+정직하게 적어 둔다. 도구를 그대로 붙이기 전에 이 셋을 확인하라.
+
+- **스크립트가 없다.** 우리 출력에는 주소가 직접 들어간다. `scriptPubKey` 는
+  `address`, `addresses`, `type` 만 채우고 `hex`/`asm` 은 빈 문자열이다.
+  `scriptPubKey.hex` 를 파싱하는 도구는 손봐야 한다.
+- **segwit·RBF 시퀀스가 없다.** `vsize` 는 `size` 와 같고 `iswitness` 는 늘
+  false, `sequence` 는 0 이다. 교체(RBF)는 시퀀스가 아니라 수수료로 판단한다.
+- **없는 메서드**: `getblocktemplate`, `submitblock`, `importaddress`,
+  `signrawtransactionwithkey`, `createrawtransaction`, `getreceivedbyaddress`.
+  raw 트랜잭션을 만들고 서명하는 것은 거래소 쪽에서 하고
+  (4절), 채굴은 노드가 스스로 한다.
+- 응답에 우리만 있는 것도 있다: `getnetworkinfo` 의 `nodeid`(전송 암호화
+  신원)와 `encryption`, `getblock` 의 `chainwork`(10진 문자열).
+
+### 흐름을 RPC 로만
+
+```
+입금 감시   getblockcount → getblockhash(h) → getblock(hash, 2)
+            → vout[].scriptPubKey.address 가 우리 주소인지
+            (해시로 이어 붙이려면 previousblockhash 로 되짚는다)
+출금        listunspent 또는 gettxout 으로 쓸 출력 확인
+            → 거래소가 서명 → sendrawtransaction(hex)
+            → getrawtransaction(txid, true).confirmations 추적
+수수료      estimatesmartfee(6).feerate  (kB 당 LIM)
+주소 확인   validateaddress(addr).isvalid
+```
+
+`sendrawtransaction` 이 받는 hex 는 SPEC 3.3 의 raw 형식이다
+(`src/serialization.js` 의 `encodeTx`/`decodeTx`). `getrawtransaction` 이
+주는 hex 를 그대로 다시 넣을 수 있다.
+
 ## 2. 주소
 
 ```
@@ -214,3 +298,4 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 - [ ] 노드 재시작 뒤 `/blocks/since` 이어 받기
 - [ ] 잘못된 주소(체크섬 틀림, 다른 망) 출금 요청이 거절되는지
 - [ ] 키가 노드 컨테이너 밖에만 있는지 (`walletEnabled: false`)
+- [ ] JSON-RPC 로 붙는다면 `getblockchaininfo` 의 `chain` 과 금액 단위(LIM 소수)를 확인
