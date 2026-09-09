@@ -277,8 +277,31 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 달라고 한 적 없는 응답, 우리가 이미 더 무거워 접는 동기화 같은 것은 벌하지
 않는다. `GET /peers/banned` 로 보고, `DELETE /peers/banned`(토큰)로 푼다.
 
-전송은 암호화되지 않는다. 공개 노드는 `wss://` 뒤에 두는 것을 권한다
-(리버스 프록시에서 TLS 를 끝내고 `LIMCOIN_PUBLIC_URL=wss://…` 로 알린다).
+**전송 암호화.** 붙자마자 서로 임시 X25519 공개키를 보내고, 자기 신원키
+(Ed25519)로 그 임시 키에 서명한다. 임시 키끼리 ECDH 한 비밀을 HKDF 로 늘려
+방향마다 다른 키를 뽑고, 그 뒤 모든 메시지를 ChaCha20-Poly1305 로 싼다.
+
+```
+HANDSHAKE  { v: 1, network, id: <ed25519 pub hex>, eph: <x25519 pub hex>,
+             sig: <ed25519("limcoin/transport/1|<network>|<eph>")> }
+ENC        { n: <번호>, c: <ChaCha20-Poly1305(JSON) ‖ 태그> }
+```
+
+- nonce 는 `0x00000000 ‖ uint64BE(번호)`. 번호는 방향마다 1씩 오르고, 받는
+  쪽은 정확히 다음 번호만 받는다(재생·끼워넣기 차단).
+- 임시 키는 연결마다 새로 만든다 — 신원키가 나중에 새도 지난 대화는 풀리지
+  않는다(전방 비밀성).
+- 신원키는 데이터 디렉터리의 `node_key`(0600). 그 공개키가 노드 id 이고,
+  피어 주소에 `#<id>` 를 붙이면 그 노드가 맞는지 확인한다. 고정하지 않으면
+  엿듣기는 막지만 중간자는 막지 못한다.
+
+| `LIMCOIN_ENCRYPT` | |
+|---|---|
+| `optional`(기본) | 상대가 받아 주면 암호화한다. 1.5초 안에 핸드셰이크가 없으면 평문으로 (익스플로러 등) |
+| `required` | 암호화하지 못하는 피어는 끊는다 |
+| `off` | 하지 않는다 |
+
+`wss://` 뒤에 두는 것도 여전히 좋다 — 그쪽은 인증서로 신원을 보증한다.
 
 ## 7. REST API
 
@@ -308,6 +331,7 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 | `POST /script/decode` | `{redeemScript}` → 주소와 읽은 내용 |
 | `POST /transactions/build` | `{inputs, outputs, lockTime}` → 서명하지 않은 트랜잭션과 서명 대상(txid) |
 | `GET /peers/banned` | 한동안 받지 않기로 한 주소들 |
+| `GET /peers/detail` | 피어마다 암호화 여부와 상대 노드 id |
 
 ### 공개 (쓰기)
 | | |
@@ -353,4 +377,5 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 | `LIMCOIN_MAX_MEMPOOL_BYTES` | mempool 바이트 상한(기본 5,000,000) |
 | `LIMCOIN_MAX_MEMPOOL_TXS` | mempool 건수 상한(기본 5000) |
 | `LIMCOIN_BLOCK_CACHE` | 메모리에 두는 블록 본문 수(기본 600). 나머지는 필요할 때 디스크에서 읽는다 |
+| `LIMCOIN_ENCRYPT` | 전송 암호화 `optional`(기본) / `required` / `off` |
 | `LIMCOIN_WALLET_PASSPHRASE` | 지갑 파일 암호. 뜰 때 자동으로 풀거나 걸 때 쓴다 |

@@ -3,6 +3,7 @@ const WebSockets = require('ws'),
   Blockchain = require('./blockchain'),
   Mempool = require("./memPool"),
   ChainIndex = require("./chainIndex"),
+  Transport = require("./transport"),
   Params = require("./params");
 
 // 망 매직. 다른 망의 피어는 붙자마자 끊는다 — 테스트넷과 메인넷이 섞이면 안 된다.
@@ -329,6 +330,20 @@ const initSocketConnection = ws => {
   sockets.push(ws);
   handleSocketMessages(ws);
   handleSocketError(ws);
+  /*
+   * 암호화 핸드셰이크를 먼저 보낸다. 상대도 보내 오면 그다음부터 오가는
+   * 것은 전부 암호문이다. 못 하는 상대(익스플로러 등)와는 평문으로 간다
+   * — LIMCOIN_ENCRYPT=required 면 그런 상대는 끊는다.
+   */
+  const opening = Transport.startSession(ws, NETWORK_MAGIC, pending => {
+    // 상대가 암호화를 모른다. 미뤄 둔 것을 평문으로 보낸다.
+    for (const message of pending) {
+      sendRaw(ws, message);
+    }
+  });
+  if (opening !== null) {
+    sendRaw(ws, opening);
+  }
   // 망을 먼저 밝힌다. 상대가 다른 망이면 이걸 보고 끊는다.
   sendMessage(ws, hello(publicUrl));
   sendMessage(ws, getLatest());
@@ -380,11 +395,39 @@ const handleSocketMessages = ws => {
       }
       return; // 이번 메시지는 버린다
     }
-    const message = parseData(data);
-    if (message === null) {
+    const raw = parseData(data);
+    if (raw === null) {
       misbehaving(ws, PENALTY.MALFORMED, "JSON 이 아닙니다");
       return;
     }
+    const opened = Transport.unwrap(ws, raw, NETWORK_MAGIC, ws.pinnedId);
+    if (opened.fatal) {
+      // 고정한 신원이 아니다. 다시 걸지도 않는다.
+      console.log(`${opened.reject}: ${ws.peerUrl || "inbound"}`);
+      if (ws.peerUrl) {
+        disconnectPeer(ws.peerUrl);
+      }
+      try {
+        ws.close();
+      } catch (e) {
+        // 이미 닫혔다
+      }
+      return;
+    }
+    if (opened.reject) {
+      misbehaving(ws, PENALTY.MALFORMED, opened.reject);
+      return;
+    }
+    if (opened.handled) {
+      if (opened.established) {
+        // 핸드셰이크를 기다리며 미뤄 둔 것들을 이제 보낸다
+        for (const frame of Transport.drainQueue(ws)) {
+          sendRaw(ws, frame);
+        }
+      }
+      return;
+    }
+    const message = opened.message;
     try {
       handleMessage(ws, message);
     } catch (e) {
@@ -933,7 +976,8 @@ const finishSync = ws => {
 };
 
 // JSON 메세지 보내기 to WS
-const sendMessage = (ws, message) => {
+// 감싸지 않고 그대로 보낸다 (핸드셰이크 자체)
+const sendRaw = (ws, message) => {
   if (ws.readyState !== WebSockets.OPEN) {
     return;
   }
@@ -941,6 +985,17 @@ const sendMessage = (ws, message) => {
     ws.send(JSON.stringify(message));
   } catch (e) {
     console.log(`Failed to send a message to a peer: ${e.message}`);
+  }
+};
+
+const sendMessage = (ws, message) => {
+  if (ws.readyState !== WebSockets.OPEN) {
+    return;
+  }
+  // 핸드셰이크가 끝났으면 암호화해서, 아직이면 정책에 따라 평문이나 대기열로
+  const { send } = Transport.wrap(ws, message);
+  if (send !== null) {
+    sendRaw(ws, send);
   }
 };
 // 모두에게 보내기
@@ -965,6 +1020,7 @@ const broadcastTx = tx => sendMessageToAll(mempoolResponse([tx]));
 const handleSocketError = ws => {
   const closeSocketConnetion = ws => {
     clearInterval(ws.keepAliveId);
+    Transport.endSession(ws);
     ws.close();
     const index = sockets.indexOf(ws);
     if (index !== -1) {
@@ -1005,6 +1061,8 @@ const dial = url => {
   }
   const ws = new WebSockets(url, { maxPayload: MAX_MESSAGE_BYTES });
   ws.peerUrl = url;
+  // 주소에 #<노드 id> 를 붙여 두었으면 그 노드가 맞는지 확인한다
+  ws.pinnedId = peer.pinnedId || null;
   peer.socket = ws;
 
   ws.on("open", () => {
@@ -1047,7 +1105,12 @@ const setPublicUrl = url => {
   publicUrl = url;
 };
 
-const connectToPeers = newPeer => {
+const connectToPeers = peerAddress => {
+  /*
+   * 주소 뒤에 #<노드 id> 를 붙이면 그 신원이 맞는지 확인한다. 고정하지
+   * 않으면 엿듣기는 막지만 중간자는 막지 못한다.
+   */
+  const { url: newPeer, id: pinnedId } = Transport.splitPinned(peerAddress);
   if (newPeer === publicUrl) {
     throw Error("자기 자신에게는 붙지 않습니다");
   }
@@ -1061,7 +1124,7 @@ const connectToPeers = newPeer => {
   if (sockets.length >= MAX_PEERS) {
     throw Error(`피어 수 상한(${MAX_PEERS})에 도달했습니다`);
   }
-  dialedPeers.set(newPeer, { attempts: 0, timer: null, socket: null });
+  dialedPeers.set(newPeer, { attempts: 0, timer: null, socket: null, pinnedId });
   dial(newPeer);
 };
 
@@ -1085,6 +1148,15 @@ const disconnectPeer = url => {
 const getDialedPeers = () => Array.from(dialedPeers.keys());
 
 // 연결된 피어 주소 목록
+// 피어마다 암호화 상태와 상대 노드 id
+const getPeerInfo = () =>
+  sockets.map(ws => ({
+    url: ws.peerUrl || null,
+    inbound: !ws.peerUrl,
+    encrypted: Transport.isEncrypted(ws),
+    peerId: Transport.peerIdOf(ws)
+  }));
+
 const getPeers = () =>
   sockets.map(ws => {
     if (ws.peerUrl) {
@@ -1119,6 +1191,7 @@ module.exports = {
   broadcastNewBlock,
   broadcastMempool,
   broadcastTx,
+  getPeerInfo,
   getBanned,
   clearBans,
   isBanned,

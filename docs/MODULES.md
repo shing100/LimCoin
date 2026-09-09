@@ -11,6 +11,12 @@
 4. compileTarget / hashMeetsCompiled 채굴 루프용 빠른 비교
 
 
+### transport.js
+1. loadIdentity / nodeId 노드 신원키 (Ed25519)
+2. startSession / unwrap 핸드셰이크 (임시 X25519 + 서명)
+3. wrap / drainQueue 프레임 암호화 (ChaCha20-Poly1305)
+4. splitPinned 주소에 붙인 신원 떼어 내기
+
 ### store.js
 1. scanBlocks 한 줄씩 훑기 (줄 위치 기록)
 2. readBlockAt 블록 하나만 읽기

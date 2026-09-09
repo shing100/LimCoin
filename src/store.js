@@ -86,6 +86,9 @@ const close = () => {
 
 const isOpen = () => dir !== null;
 
+// 지금 열려 있는 데이터 디렉터리 (노드 신원키도 여기에 둔다)
+const currentDir = () => dir;
+
 /**
  * 저장된 블록을 읽는다.
  *
@@ -342,6 +345,7 @@ module.exports = {
   open,
   close,
   isOpen,
+  currentDir,
   scanBlocks,
   readBlockAt,
   truncateBlocksTo,
