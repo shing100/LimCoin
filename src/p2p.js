@@ -195,12 +195,124 @@ const peersResponse = peers => ({ type: PEERS_RESPONSE, data: { peers } });
 // 소켓 가져오기
 const getSockets = () => sockets;
 
+/* ------------------------------------------- 못된 피어 다루기
+ *
+ * 지금까지는 피어가 무엇을 보내든 연결을 유지했다. 깨진 메시지도, 검증에서
+ * 떨어지는 블록도, 초당 수천 건도 그냥 로그만 찍고 넘어갔다. 그래서 한
+ * 피어가 계속 쓰레기를 보내며 노드의 CPU 를 먹을 수 있었다.
+ *
+ * 비트코인처럼 점수를 매긴다. 잘못할 때마다 점수를 더하고, 100점이 되면
+ * 끊고 그 주소를 한동안 받지 않는다. 실수 한 번으로 끊지는 않는다 —
+ * 깨진 메시지 하나는 버그일 수도 있고 망 사정일 수도 있다.
+ */
+const BAN_THRESHOLD = 100;
+const BAN_DURATION = 24 * 60 * 60 * 1000; // 하루
+
+// 잘못의 무게
+const PENALTY = {
+  MALFORMED: 10,      // JSON 이 아니거나 모양이 어긋난 메시지
+  BAD_BLOCK: 50,      // 검증에서 떨어지는 블록/헤더
+  WRONG_NETWORK: 100, // 다른 망 — 바로 끊는다
+  FLOOD: 25           // 너무 빨리 보낸다
+};
+
+/*
+ * 메시지 속도 제한 (토큰 버킷).
+ *
+ * 동기화 중에는 한꺼번에 많이 오가므로 넉넉해야 한다. 블록 묶음 요청·응답이
+ * 오가는 것을 생각하면 초당 50건이면 충분하고, 잠깐 몰리는 것은 200건까지
+ * 받아 준다.
+ */
+const MESSAGE_RATE = 50;   // 초당
+const MESSAGE_BURST = 200;
+
+// 주소 -> 밴이 풀리는 시각
+const banned = new Map();
+
+const isBanned = address => {
+  const until = banned.get(address);
+  if (until === undefined) {
+    return false;
+  }
+  if (until <= Date.now()) {
+    banned.delete(address);
+    return false;
+  }
+  return true;
+};
+
+const banAddress = (address, reason) => {
+  if (!address) {
+    return;
+  }
+  banned.set(address, Date.now() + BAN_DURATION);
+  console.log(`${address} 를 하루 동안 받지 않습니다: ${reason}`);
+};
+
+const getBanned = () =>
+  [...banned.entries()]
+    .filter(([address]) => isBanned(address))
+    .map(([address, until]) => ({ address, until: new Date(until).toISOString() }));
+
+const clearBans = () => {
+  const count = banned.size;
+  banned.clear();
+  return count;
+};
+
+// 소켓의 상대 주소 (밴 목록의 열쇠). 우리가 건 연결이면 그 URL.
+const addressOf = ws =>
+  ws.peerUrl ||
+  (ws._socket && ws._socket.remoteAddress) ||
+  null;
+
+/*
+ * 점수를 더한다. 문턱을 넘으면 끊고 밴한다.
+ * 돌려주는 값이 true 면 이 소켓은 더 볼 필요가 없다.
+ */
+const misbehaving = (ws, points, reason) => {
+  ws.banScore = (ws.banScore || 0) + points;
+  console.log(`피어가 규칙을 어겼습니다 (+${points} = ${ws.banScore}): ${reason}`);
+  if (ws.banScore < BAN_THRESHOLD) {
+    return false;
+  }
+  banAddress(addressOf(ws), reason);
+  try {
+    ws.close();
+  } catch (e) {
+    // 이미 닫혔다
+  }
+  return true;
+};
+
+// 너무 빨리 보내는가
+const overRateLimit = ws => {
+  const now = Date.now();
+  if (ws.tokens === undefined) {
+    ws.tokens = MESSAGE_BURST;
+    ws.tokensAt = now;
+  }
+  ws.tokens = Math.min(MESSAGE_BURST, ws.tokens + ((now - ws.tokensAt) / 1000) * MESSAGE_RATE);
+  ws.tokensAt = now;
+  if (ws.tokens < 1) {
+    return true;
+  }
+  ws.tokens -= 1;
+  return false;
+};
+
 // 서버 시작하기
 const startP2PServer = server => {
   const wsServer = new WebSockets.Server({ server, maxPayload: MAX_MESSAGE_BYTES });
   wsServer.on("connection", ws => {
     if (sockets.length >= MAX_PEERS) {
       console.log(`피어 수 상한(${MAX_PEERS})에 걸려 연결을 거절했습니다`);
+      ws.close();
+      return;
+    }
+    const from = addressOf(ws);
+    if (isBanned(from)) {
+      console.log(`밴 중인 주소의 연결을 거절했습니다: ${from}`);
       ws.close();
       return;
     }
@@ -262,16 +374,29 @@ const parseData = data => {
  */
 const handleSocketMessages = ws => {
   ws.on("message", data => {
+    if (overRateLimit(ws)) {
+      if (misbehaving(ws, PENALTY.FLOOD, `초당 ${MESSAGE_RATE}건을 넘겼습니다`)) {
+        return;
+      }
+      return; // 이번 메시지는 버린다
+    }
+    const message = parseData(data);
+    if (message === null) {
+      misbehaving(ws, PENALTY.MALFORMED, "JSON 이 아닙니다");
+      return;
+    }
     try {
-      handleMessage(ws, parseData(data));
+      handleMessage(ws, message);
     } catch (e) {
       console.log(`피어가 보낸 메시지를 처리하다 실패했습니다: ${e.message}`);
+      misbehaving(ws, PENALTY.MALFORMED, `처리 중 예외: ${e.message}`);
     }
   });
 };
 
 const handleMessage = (ws, message) => {
     if(message === null || typeof message !== "object"){
+      misbehaving(ws, PENALTY.MALFORMED, "메시지가 객체가 아닙니다");
       return;
     }
     switch (message.type) {
@@ -325,11 +450,11 @@ const handleMessage = (ws, message) => {
           break;
         }
         if(message.data.network !== NETWORK_MAGIC){
-          console.log(`다른 망의 피어입니다 (${message.data.network}). 끊습니다.`);
           if (ws.peerUrl) {
             disconnectPeer(ws.peerUrl); // 우리가 건 것이면 다시 걸지도 않는다
           }
-          ws.close();
+          // 다른 망은 실수가 아니다. 바로 끊고 한동안 받지 않는다.
+          misbehaving(ws, PENALTY.WRONG_NETWORK, `다른 망입니다 (${message.data.network})`);
           break;
         }
         handleHello(ws, message.data.url);
@@ -620,7 +745,7 @@ const handleHeadersResponse = (ws, data) => {
     // 첫 묶음. 우리 체인 어딘가에 붙어야 한다.
     const first = headers[0];
     if (first === null || typeof first !== "object" || typeof first.previousHash !== "string") {
-      resetSync(ws, "받은 헤더의 모양이 맞지 않습니다");
+      resetSync(ws, "받은 헤더의 모양이 맞지 않습니다", true);
       return;
     }
     const forkParent = ChainIndex.findBlockHeight(first.previousHash);
@@ -640,7 +765,7 @@ const handleHeadersResponse = (ws, data) => {
       return;
     }
     if (!isHeaderValid(header, sync.window)) {
-      resetSync(ws, `헤더 #${header && header.index} 이 검증에서 떨어졌습니다`);
+      resetSync(ws, `헤더 #${header && header.index} 이 검증에서 떨어졌습니다`, true);
       return;
     }
     sync.window.push(header);
@@ -707,11 +832,18 @@ const responseBlocks = locator => {
   return blocksResponse(blocks, chain.length - 1);
 };
 
-const resetSync = (ws, reason) => {
+/*
+ * 동기화를 접는다. blame 이 true 면 상대가 잘못 보낸 것이므로 점수를 매긴다
+ * (우리가 이미 더 무겁다 같은 정상적인 중단에는 매기지 않는다).
+ */
+const resetSync = (ws, reason, blame = false) => {
   if (reason) {
     console.log(`동기화를 중단합니다: ${reason}`);
   }
   ws.sync = freshSyncState();
+  if (blame) {
+    misbehaving(ws, PENALTY.BAD_BLOCK, reason);
+  }
 };
 
 // 한 묶음 안에서 모양이 맞고 서로 이어지는지
@@ -735,12 +867,12 @@ const handleBlocksResponse = (ws, data) => {
     return;
   }
   if (!isBatchWellFormed(blocks)) {
-    resetSync(ws, "받은 묶음이 서로 이어지지 않습니다");
+    resetSync(ws, "받은 묶음이 서로 이어지지 않습니다", true);
     return;
   }
   // 헤더를 먼저 받았다면, 그때 본 블록만 받는다
   if (sync.expected !== null && !blocks.every(block => sync.expected.has(block.hash))) {
-    resetSync(ws, "헤더에 없던 블록이 왔습니다");
+    resetSync(ws, "헤더에 없던 블록이 왔습니다", true);
     return;
   }
 
@@ -748,7 +880,7 @@ const handleBlocksResponse = (ws, data) => {
     // 우리 끝에 그대로 이어진다. 하나씩 붙이고 쌓아 두지 않는다.
     for (const block of blocks) {
       if (!addBlockToChain(block)) {
-        resetSync(ws, `블록 #${block.index} 이 검증에서 떨어졌습니다`);
+        resetSync(ws, `블록 #${block.index} 이 검증에서 떨어졌습니다`, true);
         return;
       }
     }
@@ -762,7 +894,7 @@ const handleBlocksResponse = (ws, data) => {
         return;
       }
     } else if (blocks[0].previousHash !== tail) {
-      resetSync(ws, "받은 묶음이 앞서 받은 것에 이어지지 않습니다");
+      resetSync(ws, "받은 묶음이 앞서 받은 것에 이어지지 않습니다", true);
       return;
     }
     if (sync.buffer.length + blocks.length > MAX_SYNC_BUFFER) {
@@ -859,6 +991,10 @@ const scheduleReconnect = url => {
 };
 
 const dial = url => {
+  if (isBanned(url)) {
+    console.log(`밴 중인 피어에는 걸지 않습니다: ${url}`);
+    return;
+  }
   const peer = dialedPeers.get(url);
   if (!peer) {
     return;
@@ -982,5 +1118,13 @@ module.exports = {
   NETWORK_MAGIC,
   broadcastNewBlock,
   broadcastMempool,
-  broadcastTx
+  broadcastTx,
+  getBanned,
+  clearBans,
+  isBanned,
+  misbehaving,
+  BAN_THRESHOLD,
+  PENALTY,
+  MESSAGE_RATE,
+  MESSAGE_BURST
 };

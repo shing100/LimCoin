@@ -182,6 +182,20 @@ app.route("/blocks").get((req, res) => {
  * connectToPeers 가 본다(ws:// 또는 wss://).
  */
 // 아는 주소 전부 (아직 붙지 않은 것 포함). 피어에게 배운 것이 여기 쌓인다.
+/*
+ * 규칙을 어겨 한동안 받지 않기로 한 주소들.
+ *
+ * 목록은 공개다(누가 막혔는지는 비밀이 아니다). 푸는 것은 지갑 토큰을
+ * 요구한다 — 아무나 풀 수 있으면 밴이 의미가 없다.
+ */
+app.route("/peers/banned")
+  .get((req, res) => {
+    res.send(P2P.getBanned());
+  })
+  .delete(requireWalletAuth, (req, res) => {
+    res.send({ cleared: P2P.clearBans() });
+  });
+
 app.get("/peers/known", (req, res) => {
   res.send(getKnownAddresses());
 });
@@ -417,6 +431,7 @@ app.get("/health", (req, res) => {
     peers: getPeers().length,
     mempool: getMempool().length,
     walletEnabled: Wallet.isEnabled(),
+    walletLocked: Wallet.isEnabled() && Wallet.isLocked(),
     uptime: Math.round((Date.now() - STARTED_AT) / 1000)
   });
 });
@@ -767,9 +782,11 @@ app.get("/info", (req, res) => {
     // 어느 망의 노드인지. 주소 형식과 제네시스가 이것으로 갈린다.
     network: Params.current().name,
     addressVersion: Params.current().addressVersion,
+    scriptAddressVersion: Params.current().scriptAddressVersion,
     genesisHash: getBlockChain()[0].hash,
     chainWork: chainWork(getBlockChain()).toString(),
     walletEnabled: Wallet.isEnabled(),
+    walletLocked: Wallet.isEnabled() && Wallet.isLocked(),
     version: VERSION
   });
 });

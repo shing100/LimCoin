@@ -23,6 +23,7 @@ const { keyOf, outpointKey } = require("./utxo");
 
 const Address = require("./address");
 const Keys = require("./keys");
+const crypto = require("crypto");
 const { estimateTxSize } = require("./serialization");
 
 const {
@@ -86,6 +87,130 @@ const setEnabled = value => {
 };
 const isEnabled = () => enabled;
 
+/* ------------------------------------------- 지갑 파일 암호화
+ *
+ * 지갑 파일에는 니모닉이 평문으로 들어간다. 그 24단어면 이 지갑의 모든
+ * 코인을 가져갈 수 있다. 파일 권한(0600)은 같은 기계의 다른 사용자를 막을
+ * 뿐, 백업 파일이나 훔쳐 간 디스크에는 소용이 없다.
+ *
+ *   암호 = scrypt(passphrase, salt) -> AES-256-GCM
+ *
+ * scrypt 는 메모리를 많이 쓰게 만들어 GPU 로 몰아치기 어렵게 한다. GCM 은
+ * 복호와 동시에 위조를 잡아내므로, 암호가 틀리면 "틀렸다"고 바로 알 수 있고
+ * 파일을 손댄 것도 걸린다.
+ *
+ * 잠긴 동안에는 주소도 못 만든다 — 주소는 씨앗에서 나오기 때문이다.
+ * 그래서 지갑을 쓰는 엔드포인트는 423 을 돌려준다.
+ */
+const SCRYPT = { N: 1 << 15, r: 8, p: 1, keylen: 32 };
+
+const deriveKey = (passphrase, salt) =>
+  crypto.scryptSync(passphrase, salt, SCRYPT.keylen, {
+    N: SCRYPT.N,
+    r: SCRYPT.r,
+    p: SCRYPT.p,
+    // scrypt 는 N*r*128 바이트를 쓴다. 기본 상한(32MB)으로는 N=2^15 가 안 된다.
+    maxmem: 256 * 1024 * 1024
+  });
+
+const encryptWallet = (wallet, passphrase) => {
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", deriveKey(passphrase, salt), iv);
+  const body = Buffer.concat([
+    cipher.update(JSON.stringify(wallet), "utf8"),
+    cipher.final()
+  ]);
+  return {
+    version: 3,
+    crypto: {
+      kdf: "scrypt",
+      N: SCRYPT.N,
+      r: SCRYPT.r,
+      p: SCRYPT.p,
+      salt: salt.toString("hex"),
+      cipher: "aes-256-gcm",
+      iv: iv.toString("hex"),
+      tag: cipher.getAuthTag().toString("hex"),
+      data: body.toString("hex")
+    }
+  };
+};
+
+const decryptWallet = (file, passphrase) => {
+  const { salt, iv, tag, data, N, r, p } = file.crypto;
+  const key = crypto.scryptSync(passphrase, Buffer.from(salt, "hex"), SCRYPT.keylen, {
+    N, r, p, maxmem: 256 * 1024 * 1024
+  });
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "hex"));
+  decipher.setAuthTag(Buffer.from(tag, "hex"));
+  try {
+    const plain = Buffer.concat([
+      decipher.update(Buffer.from(data, "hex")),
+      decipher.final()
+    ]).toString("utf8");
+    return JSON.parse(plain);
+  } catch (e) {
+    throw Error("암호가 맞지 않습니다");
+  }
+};
+
+// 풀어 둔 암호. 메모리에만 있고 파일에는 남지 않는다.
+let passphrase = process.env.LIMCOIN_WALLET_PASSPHRASE || null;
+
+const readFile = () => JSON.parse(fs.readFileSync(walletLocation(), "utf8"));
+
+const isEncrypted = () => {
+  if (!fs.existsSync(walletLocation())) {
+    return false;
+  }
+  try {
+    return readFile().crypto !== undefined;
+  } catch (e) {
+    return false;
+  }
+};
+
+const isLocked = () => isEncrypted() && passphrase === null;
+
+const unlock = candidate => {
+  if (typeof candidate !== "string" || candidate === "") {
+    throw Error("암호를 주세요");
+  }
+  if (!isEncrypted()) {
+    throw Error("이 지갑은 암호가 걸려 있지 않습니다");
+  }
+  decryptWallet(readFile(), candidate); // 틀리면 여기서 던진다
+  passphrase = candidate;
+  cache = null;
+  return true;
+};
+
+const lock = () => {
+  passphrase = null;
+  cache = null;
+  return true;
+};
+
+/*
+ * 암호를 건다(또는 바꾼다). 지금 열려 있어야 한다 — 내용을 읽어 다시 써야
+ * 하기 때문이다. 빈 문자열을 주면 암호를 푼다(평문으로 되돌린다).
+ */
+const setPassphrase = next => {
+  const { wallet } = readWallet();
+  if (next === "" || next === null) {
+    passphrase = null;
+    writeWallet(wallet);
+    return { encrypted: false };
+  }
+  if (typeof next !== "string" || next.length < 8) {
+    throw Error("암호는 8자 이상이어야 합니다");
+  }
+  passphrase = next;
+  writeWallet(wallet);
+  return { encrypted: true };
+};
+
 const readWallet = () => {
   if (!enabled) {
     throw Error("지갑이 꺼져 있습니다 (LIMCOIN_WALLET=off)");
@@ -93,8 +218,18 @@ const readWallet = () => {
   if (cache !== null) {
     return cache;
   }
-  const wallet = JSON.parse(fs.readFileSync(walletLocation(), "utf8"));
-  cache = { wallet, seed: seedOf(wallet) };
+  const file = readFile();
+  if (file.crypto !== undefined) {
+    if (passphrase === null) {
+      const locked = Error("지갑이 잠겨 있습니다. POST /me/unlock 으로 암호를 주세요.");
+      locked.code = "WALLET_LOCKED";
+      throw locked;
+    }
+    const wallet = decryptWallet(file, passphrase);
+    cache = { wallet, seed: seedOf(wallet) };
+    return cache;
+  }
+  cache = { wallet: file, seed: seedOf(file) };
   return cache;
 };
 
@@ -110,7 +245,9 @@ const WALLET_MODE = 0o600;
 const writeWallet = wallet => {
   cache = { wallet, seed: seedOf(wallet) };
   fs.mkdirSync(path.dirname(walletLocation()), { recursive: true });
-  fs.writeFileSync(walletLocation(), JSON.stringify(wallet, null, 2) + "\n", {
+  // 암호를 풀어 둔 상태면 암호화해서 쓴다
+  const body = passphrase === null ? wallet : encryptWallet(wallet, passphrase);
+  fs.writeFileSync(walletLocation(), JSON.stringify(body, null, 2) + "\n", {
     mode: WALLET_MODE
   });
   try {
@@ -536,6 +673,11 @@ module.exports = {
   initWallet,
   getPublicKeys,
   signMessage,
+  isEncrypted,
+  isLocked,
+  unlock,
+  lock,
+  setPassphrase,
   getSeed,
   getWallet,
   getMnemonic,

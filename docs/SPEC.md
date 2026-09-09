@@ -264,6 +264,22 @@ WebSocket, 메시지는 JSON `{ "type", "data" }`. 한 메시지 ≤ 8MB.
 locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제네시스까지의 해시.
 동기화는 헤더 먼저(검증·무게 비교) → 더 무거울 때만 블록.
 
+**못된 피어.** 잘못할 때마다 점수를 더하고 100점이면 끊은 뒤 그 주소를 하루
+동안 받지 않는다.
+
+| | 점수 |
+|---|---|
+| JSON 이 아니거나 모양이 어긋난 메시지 | 10 |
+| 검증에서 떨어지는 블록·헤더 | 50 |
+| 초당 50건(순간 200건) 초과 | 25 |
+| 다른 망 | 100 (바로) |
+
+달라고 한 적 없는 응답, 우리가 이미 더 무거워 접는 동기화 같은 것은 벌하지
+않는다. `GET /peers/banned` 로 보고, `DELETE /peers/banned`(토큰)로 푼다.
+
+전송은 암호화되지 않는다. 공개 노드는 `wss://` 뒤에 두는 것을 권한다
+(리버스 프록시에서 TLS 를 끝내고 `LIMCOIN_PUBLIC_URL=wss://…` 로 알린다).
+
 ## 7. REST API
 
 인증이 필요한 것은 `Authorization: Bearer <토큰>` (`LIMCOIN_WALLET_TOKEN`).
@@ -291,6 +307,7 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 | `POST /script/address` | `{type: "multisig"|"timelock"|"htlc"|"raw", …}` → `{address, redeemScript, asm, script}` |
 | `POST /script/decode` | `{redeemScript}` → 주소와 읽은 내용 |
 | `POST /transactions/build` | `{inputs, outputs, lockTime}` → 서명하지 않은 트랜잭션과 서명 대상(txid) |
+| `GET /peers/banned` | 한동안 받지 않기로 한 주소들 |
 
 ### 공개 (쓰기)
 | | |
@@ -298,6 +315,18 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 | `POST /transactions/raw` | 서명된 트랜잭션 JSON. 유효하면 `{ id, pending: true }`, 아니면 400 과 이유 |
 
 ### 토큰 필요
+
+지갑 파일에 암호가 걸려 있고 아직 풀지 않았으면 지갑 엔드포인트는 `423 Locked`
+를 돌려준다.
+
+| | |
+|---|---|
+| `GET /me/lockstatus` | `{encrypted, locked}` |
+| `POST /me/passphrase` | 암호 걸기·바꾸기. 빈 값이면 푼다(평문으로) |
+| `POST /me/unlock` | 잠긴 지갑 풀기 |
+| `POST /me/lock` | 다시 잠그기(메모리에서 암호를 지운다) |
+| `GET /me/publickeys` | 다중서명 주소를 만들 때 쓸 이 지갑의 공개키들 |
+| `POST /me/sign` | `{tx \| txId, publicKey}` → 그 키로 한 서명 |
 | | |
 |---|---|
 | `POST /blocks` | 한 블록 채굴 |
@@ -323,3 +352,4 @@ locator: 끝에서 10개는 하나씩, 그 뒤 간격을 두 배씩 늘려 제�
 | `LIMCOIN_MAX_REORG_DEPTH` | 되감기 상한(기본 100). `0` 이면 상한 없음 |
 | `LIMCOIN_MAX_MEMPOOL_BYTES` | mempool 바이트 상한(기본 5,000,000) |
 | `LIMCOIN_MAX_MEMPOOL_TXS` | mempool 건수 상한(기본 5000) |
+| `LIMCOIN_WALLET_PASSPHRASE` | 지갑 파일 암호. 뜰 때 자동으로 풀거나 걸 때 쓴다 |

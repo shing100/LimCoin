@@ -88,6 +88,10 @@ docker compose up          # 테스트넷 3노드: seed(채굴) + node-a + node-
 34자다. `POST /script/address` 로 만들고 `POST /transactions/build` +
 `POST /me/sign` 으로 여럿이 나눠 서명한다.
 
+**지킴** — 피어가 잘못하면 점수를 매기고 100점이면 끊고 하루 동안 받지 않는다
+(메시지 속도 제한 포함). 지갑 파일은 scrypt + AES-256-GCM 으로 잠글 수 있다.
+우리 끝에서 100블록보다 깊이 되감으라는 체인은 무게와 무관하게 거부한다.
+
 **API** — 읽기는 공개(CORS 허용), 지갑은 토큰. 외부에서 서명한 트랜잭션은
 `POST /transactions/raw`. 입금 감시는 `GET /blocks/since/:hash`. `/health`,
 `/metrics`(Prometheus). 권장 수수료 `GET /fees`. → [SPEC 7절](docs/SPEC.md#7-rest-api)
