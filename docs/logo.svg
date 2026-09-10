@@ -1,0 +1,10 @@
+<!--
+  LimCoin 브랜드 마크. 금화 안에 블록 네 개로 쌓은 L.
+  원본 좌표는 LimCoin-Explorer/src/logo.json 에 있고, 이 파일은 그것으로
+  만든 사본이다(LimCoin-Explorer/scripts/icons.js). 모양을 바꾸면 세 저장소를
+  같이 고칠 것 — 노드·익스플로러·지갑이 같은 상표를 쓴다.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64">
+  <circle cx="32" cy="32" r="30" fill="#e0a82e"/>
+  <rect x="17.50" y="13.00" width="12.00" height="12.00" rx="2.50" fill="#231703"/><rect x="17.50" y="26.00" width="12.00" height="12.00" rx="2.50" fill="#231703"/><rect x="17.50" y="39.00" width="12.00" height="12.00" rx="2.50" fill="#231703"/><rect x="30.50" y="39.00" width="16.00" height="12.00" rx="2.50" fill="#231703"/>
+</svg>

@@ -1,3 +1,5 @@
+<img src="docs/logo.svg" width="72" height="72" alt="LimCoin">
+
 # LimCoin
 
 비트코인 백서를 따라 만든 UTXO 블록체인 노드. Node.js, 의존성 최소.
