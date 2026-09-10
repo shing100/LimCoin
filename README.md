@@ -101,7 +101,10 @@ docker compose up          # 테스트넷 3노드: seed(채굴) + node-a + node-
 
 **API** — 읽기는 공개(CORS 허용), 지갑은 토큰. 외부에서 서명한 트랜잭션은
 `POST /transactions/raw`. 입금 감시는 `GET /blocks/since/:hash`. `/health`,
-`/metrics`(Prometheus). 권장 수수료 `GET /fees`. → [SPEC 7절](docs/SPEC.md#7-rest-api)
+`/metrics`(Prometheus). 권장 수수료 `GET /fees`. 집계는 `GET /richlist`(주소별
+잔액 순위)와 `GET /stats/blocks`(최근 블록의 난이도·간격·트랜잭션 수) —
+헤더만 훑어 만들므로 익스플로러가 블록 본문을 다 받지 않아도 된다.
+→ [SPEC 7절](docs/SPEC.md#7-rest-api)
 
 **JSON-RPC** — 같은 노드가 `POST /rpc` 로 비트코인 코어와 같은 메서드를 받는다
 (`getblockcount`, `getblock`, `sendrawtransaction`, `gettxout`, `listunspent` …

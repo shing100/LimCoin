@@ -20,7 +20,8 @@ const express = require("express"),
 const {
   getBlockChain, createNewBlock, getAccountBalance, getSpendableBalance,
   getImmatureBalance, sendTx, getUTxOutList, persistMempool, submitTx, tipWork,
-  getTxProof, getNewestBlock, initChain, getBlockByHash, findTx
+  getRichList, getBlockSeries, BlOCK_GENERATION_INTERVAL,
+  getTxProof, getNewestBlock, initChain, getBlockByHash, getBlockByHeight, findTx
 } = Blockchain;
 const { getTxFee } = Transactions;
 const { indexByOutpoint, indexByAddress, keyOf } = require("./utxo");
@@ -508,6 +509,27 @@ app.get("/metrics", (req, res) => {
   res.type("text/plain; version=0.0.4").send(lines.join("\n") + "\n");
 });
 
+/*
+ * 높이로 블록 하나.
+ *
+ * 예전에는 이게 없어서, 익스플로러가 "/height/123" 을 열 때 목록을 두 번
+ * 불러 총 개수를 알아낸 뒤 offset 을 계산해 한 개를 집어 왔다. 색인에는
+ * 높이로 바로 찾는 길이 이미 있었는데 밖으로 내주지 않았을 뿐이다.
+ */
+app.get("/blocks/height/:height", (req, res) => {
+  const height = Number(req.params.height);
+  if (!Number.isInteger(height) || height < 0) {
+    res.status(400).send("높이는 0 이상의 정수여야 합니다");
+    return;
+  }
+  const block = getBlockByHeight(height);
+  if (block === undefined) {
+    res.status(404).send("Block not found");
+    return;
+  }
+  res.send(block);
+});
+
 app.get("/blocks/:hash", (req, res) => {
   const { params : { hash } } = req;
   const block = getBlockByHash(hash);
@@ -856,6 +878,14 @@ app.get("/info", (req, res) => {
     maxBlockBytes: MAX_BLOCK_BYTES,
     minRelayFeeRate: MIN_RELAY_FEE_RATE,
     coinbaseMaturity: COINBASE_MATURITY,
+    /*
+     * 목표 블록 간격(초). 난이도 조정이 맞추려는 값이다.
+     *
+     * 실제 간격을 그리는 쪽(익스플로러 차트)에서 "빠르다/느리다"를 말하려면
+     * 기준선이 있어야 하는데, 그 값을 프론트에 상수로 박아 두면 합의 규칙이
+     * 두 군데에 흩어진다.
+     */
+    targetSpacing: BlOCK_GENERATION_INTERVAL,
     indexedAddresses: AddressIndex.getIndexedAddressCount(),
     // 지갑이 기본값으로 쓸 입력당 권장 수수료
     recommendedFeePerByte: Mempool.estimateFee(getUTxOutList(), MAX_BLOCK_BYTES).perByte,
@@ -880,6 +910,41 @@ app.get("/info", (req, res) => {
  */
 app.get("/fees", (req, res) => {
   res.send(Mempool.estimateFee(getUTxOutList(), MAX_BLOCK_BYTES));
+});
+
+/*
+ * 잔액 상위 주소.
+ *
+ * "누가 얼마나 갖고 있나"는 상장 심사에서 늘 묻는 것이고(분배가 한쪽으로
+ * 쏠려 있으면 시세를 만들기 쉽다), 지금까지는 답할 방법이 없었다.
+ *
+ * 답할 때 한 가지는 분명히 해야 한다: 이건 **주소** 순위지 사람 순위가
+ * 아니다. 한 사람이 주소를 여럿 갖는 것이 HD 지갑의 기본이고, 거래소는
+ * 반대로 수많은 사람의 돈을 주소 몇 개에 모아 둔다. 체인만 봐서는 구별할
+ * 수 없다 — 그래서 응답에도 그 말을 담아 보낸다.
+ */
+app.get("/richlist", (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 50, 500);
+  const { total, rows } = getRichList(limit);
+  const newest = getNewestBlock();
+  res.send({
+    supply: getTotalSupply(newest.index),
+    addresses: total,
+    height: newest.index,
+    note: "주소 순위이지 사람 순위가 아닙니다. 한 사람이 주소를 여럿 가질 수 있고, 거래소 주소에는 여러 사람의 돈이 섞여 있습니다.",
+    rows
+  });
+});
+
+/*
+ * 최근 블록의 시계열 — 난이도, 블록 사이 시간, 트랜잭션 수.
+ *
+ * 익스플로러가 차트를 그리려면 블록을 하나씩 받아 훑는 수밖에 없었다.
+ * 200블록이면 200번 왕복이다. 헤더에 이미 있는 값이라 한 번에 준다.
+ */
+app.get("/stats/blocks", (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 200, 2000);
+  res.send(getBlockSeries(limit));
 });
 
 app.get("/address/:address", (req, res) => {

@@ -359,11 +359,14 @@ ENC        { n: <번호>, c: <ChaCha20-Poly1305(JSON) ‖ 태그> }
 | `GET /blocks?limit&offset` | 최신순 한 페이지. `X-Total-Count` |
 | `GET /blocks/since/:hash` | 그 블록 뒤의 블록들(≤500). 없으면 404 = 밀려남 |
 | `GET /blocks/:hash` | |
+| `GET /blocks/height/:h` | 높이로 한 개. 색인으로 바로 집는다 |
 | `GET /transactions` | mempool |
 | `GET /transactions/:id` | 블록 안이든 mempool 이든. `confirmations`, `blockIndex` |
 | `GET /transactions/:id/proof` | 머클 증명 |
 | `GET /address/:a` · `/utxos` · `/transactions?limit&offset` | 잔액 / 미사용 출력(`blockIndex`,`coinbase` 포함) / 내역 |
 | `GET /fees` | `{ perInput, congested, mempoolSize, blockCapacity }` |
+| `GET /richlist?limit` | 잔액 많은 주소 순위(≤500). `{supply, addresses, height, rows}` |
+| `GET /stats/blocks?limit` | 최근 블록(≤2000)의 `{height, timestamp, bits, difficulty, solveTime, txCount}` |
 | `GET /peers` · `GET /peers/known` | |
 | `GET /search/:q` | 높이·해시·주소 판별 |
 
