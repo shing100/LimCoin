@@ -169,6 +169,27 @@ const bodyAt = height => {
 };
 
 /*
+ * 이 블록에 트랜잭션이 몇 건인가 — **본문을 읽지 않고** 알아낸다.
+ *
+ * 헤더만 메모리에 두고 본문은 디스크에서 그때그때 읽는 구조라, 통계를 내려고
+ * block.data.length 를 부르면 블록마다 디스크를 한 번씩 친다. 개수는 기록을
+ * 만들 때 이미 손에 있으므로 그때 적어 둔다.
+ *
+ * 이미 헤더 기록인 것(txCount 를 가진 것)을 다시 감쌀 때는 그 값을 물려받는다.
+ * data 를 건드리면 getter 가 깨어나 디스크를 읽는다 — 그러면 안 담은 이유가 없다.
+ */
+const txCountOf = block => {
+  if (typeof block.txCount === "number") {
+    return block.txCount;
+  }
+  const own = Object.getOwnPropertyDescriptor(block, "data");
+  if (own !== undefined && own.get === undefined && Array.isArray(own.value)) {
+    return own.value.length;
+  }
+  return null; // 알 수 없다 (본문을 읽어야 안다)
+};
+
+/*
  * 본문을 떼어 낸 헤더 기록. `data` 는 그때그때 읽어 온다.
  * height 는 배열에서의 자리다(제네시스가 0). block.index 와 같다.
  */
@@ -181,7 +202,8 @@ const headerRecordOf = (block, height) => {
     timestamp: block.timestamp,
     merkleRoot: block.merkleRoot,
     bits: block.bits,
-    nonce: block.nonce
+    nonce: block.nonce,
+    txCount: txCountOf(block)
   };
   Object.defineProperty(record, "data", {
     enumerable: true,
@@ -1407,6 +1429,73 @@ const rebuildIndexes = () => {
  */
 const getUTxOutList = () => uTxOuts.slice();
 
+/*
+ * 잔액 상위 주소 (리치리스트).
+ *
+ * UTxOut 집합을 주소로 묶으면 나온다. 다만 이건 체인 길이가 아니라 **미사용
+ * 출력 수**에 비례하는 일이라, 블록마다 부르면 아깝다. 팁이 그대로면 답도
+ * 그대로이므로 팁 해시를 열쇠로 캐시한다.
+ *
+ * 한 가지 분명히 해 둘 것: 이건 "부자 순위"가 아니라 **주소 순위**다.
+ * 한 사람이 주소를 여럿 가질 수 있고(HD 지갑은 기본이 그렇다), 거래소는
+ * 수많은 사람의 돈을 주소 몇 개에 모아 둔다. 그 둘을 구별할 방법은 체인에 없다.
+ */
+let richCache = { tip: null, rows: [] };
+
+const getRichList = (limit = 50) => {
+  const tip = blockchain[blockchain.length - 1].hash;
+  if (richCache.tip !== tip) {
+    const byAddress = new Map();
+    for (const uTxOut of uTxOuts) {
+      const seen = byAddress.get(uTxOut.address);
+      if (seen === undefined) {
+        byAddress.set(uTxOut.address, { address: uTxOut.address, balance: uTxOut.amount, outputs: 1 });
+      } else {
+        seen.balance += uTxOut.amount;
+        seen.outputs++;
+      }
+    }
+    richCache = {
+      tip,
+      rows: [...byAddress.values()].sort((a, b) => b.balance - a.balance)
+    };
+  }
+  return {
+    total: richCache.rows.length,
+    /*
+     * 캐시에 든 객체를 그대로 넘기지 않고 복사해서 준다. 부르는 쪽에서
+     * 한 줄만 고쳐도 다음 사람이 받는 값이 조용히 바뀌기 때문이다.
+     * limit 는 500 이하라 복사값이 캐시의 뜻을 지우지 않는다.
+     */
+    rows: richCache.rows
+      .slice(0, Math.max(0, limit))
+      .map(row => ({ address: row.address, balance: row.balance, outputs: row.outputs }))
+  };
+};
+
+/*
+ * 최근 블록의 시계열 — 난이도, 블록 사이 시간, 트랜잭션 수.
+ *
+ * 헤더만 훑으므로 디스크를 치지 않는다. 차트가 필요로 하는 것은 이 셋이다.
+ * txCount 가 null 인 블록은 예전 형식으로 저장된 것이다(본문을 읽어야 안다).
+ */
+const getBlockSeries = (limit = 200) => {
+  const count = Math.max(1, Math.min(limit, blockchain.length));
+  const from = blockchain.length - count;
+  return blockchain.slice(from).map((block, at) => {
+    const previous = from + at > 0 ? blockchain[from + at - 1] : null;
+    return {
+      height: block.index,
+      timestamp: block.timestamp,
+      bits: block.bits,
+      difficulty: Target.difficultyOf(block.bits),
+      // 제네시스는 앞이 없다
+      solveTime: previous === null ? null : block.timestamp - previous.timestamp,
+      txCount: typeof block.txCount === "number" ? block.txCount : null
+    };
+  });
+};
+
 // 지갑 정보 가져오기
 const getAccountBalance = () => getWalletBalance(uTxOuts);
 
@@ -1549,6 +1638,8 @@ module.exports = {
   sendTx,
   handleIncomingTxs,
   getUTxOutList,
+  getRichList,
+  getBlockSeries,
   miningAddress,
   submitTx
 };
