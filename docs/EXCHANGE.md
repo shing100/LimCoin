@@ -36,7 +36,7 @@ docker run -d --name limcoin \
 상태 확인:
 
 ```
-GET /health   → { ok, network, height, tipAge, peers, mempool, walletEnabled, uptime }
+GET /health   → { ok, network, version, height, tipAge, peers, mempool, walletEnabled, walletLocked, uptime }
 GET /metrics  → Prometheus (limcoin_height, limcoin_peers, limcoin_tip_age_seconds …)
 ```
 
@@ -176,7 +176,7 @@ mainnet version 0x30 ('L…'), testnet 0x6f ('m…' / 'n…')
 ```
 1. GET /address/:from/utxos           → 쓸 수 있는 출력 목록
    coinbase: true 인 것은 height + 1 − blockIndex ≥ 10 인 것만 쓴다
-2. GET /fees                          → perInput (입력 하나당 권장 수수료)
+2. GET /fees                          → perByte·typicalTx (바이트당 권장 수수료와 보통 트랜잭션 값)
 3. 트랜잭션을 만든다:
    txIns  = 고른 출력들 { txOutId, txOutIndex, publicKey: <그 주소의 공개키 hex> }
    txOuts = [{ address: 받는이, amount }, { address: 우리 거스름돈 주소, amount: 잔액 }]
