@@ -207,6 +207,9 @@ tx.txIns[0].signature = Keys.sign(priv, tx.id);
 - 같은 UTxO 를 두 번 쓰는 트랜잭션은 mempool 이 거절한다. 출금 프로세스가
   둘이면 UTxO 를 나눠 써라.
 - `POST /transactions/raw` 는 인증이 없다. 유효한 서명이 곧 권한이다.
+- 모든 HTTP 요청은 IP 별 레이트리밋을 지난다. 분당 기본 240 건
+  (`LIMCOIN_HTTP_RATE_LIMIT`) 을 넘기면 429 와 `Retry-After` 로 답하니,
+  폴링은 이 속도 안에서 하면 된다.
   노드를 공개망에 두면 아무나 (유효한) 트랜잭션을 넣을 수 있지만, 그것은
   P2P 로도 되는 일이다.
 

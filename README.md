@@ -24,7 +24,7 @@
 
 ```bash
 yarn install
-yarn test                                   # 310건, node:test (프레임워크 없음)
+yarn test                                   # 315건, node:test (프레임워크 없음)
 LIMCOIN_NETWORK=testnet node src/server.js  # 테스트넷 노드
 ```
 
@@ -65,6 +65,8 @@ docker compose up          # 테스트넷 3노드: seed(채굴) + node-a + node-
 | `LIMCOIN_MINER_THREADS` | 채굴 워커 수 (기본 코어 − 1) |
 | `LIMCOIN_PEERS` | 뜰 때 붙을 피어. `ws://a:3000,ws://b:3000` |
 | `LIMCOIN_PUBLIC_URL` | 남이 나에게 걸 수 있는 주소. 피어 발견에 쓴다 |
+| `LIMCOIN_HTTP_RATE_LIMIT` | 공개 HTTP API 분당 요청 상한 (기본 240, `0` 이면 끔) |
+| `LIMCOIN_TRUST_PROXY` | 프록시 뒤에서 진짜 클라이언트 IP 를 믿는다 (express `trust proxy`) |
 
 ## 무엇이 들어 있나
 
@@ -142,7 +144,7 @@ reorg 정책, 체크리스트는 [docs/EXCHANGE.md](docs/EXCHANGE.md).
 ## 개발
 
 ```bash
-yarn test                    # 전체 310건
+yarn test                    # 전체 315건
 yarn lint                    # eslint — 오타 전역, 안 쓰는 변수, 삼킨 예외
 yarn coverage                # 줄·분기 커버리지
 yarn fuzz                    # 퍼징만. LIMCOIN_FUZZ_SEED 로 씨앗을 바꾼다
@@ -152,10 +154,10 @@ node --test test/sync.test.js
 node scripts/generate-genesis.js --network testnet   # 제네시스 다시 만들기 (모든 노드가 공유해야 한다)
 ```
 
-테스트는 Node 내장 `node:test` 로 310건. 실제로 nonce 를 찾아 블록을 만들고
+테스트는 Node 내장 `node:test` 로 315건. 실제로 nonce 를 찾아 블록을 만들고
 (`test/helpers.js`), 두세 노드를 띄워 동기화·reorg·피어 발견을 확인하는 식이다.
 암호 기본 요소는 외부 벡터(비트코인 주소, secp256k1 G, sha256d)로 맞춘다.
-줄 커버리지는 91%(분기 89%).
+줄 커버리지는 91%(분기 88%).
 
 `test/fuzz.test.js` 는 반대 방향이다 — 씨앗을 고정한 난수를 잔뜩 넣고 "어떤
 입력이 와도 성립해야 하는 것"만 본다: 남이 보낸 것을 다루는 자리(P2P 메시지,

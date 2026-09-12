@@ -350,6 +350,9 @@ ENC        { n: <번호>, c: <ChaCha20-Poly1305(JSON) ‖ 태그> }
 ## 7. REST API
 
 인증이 필요한 것은 `Authorization: Bearer <토큰>` (`LIMCOIN_WALLET_TOKEN`).
+공개든 인증이 필요한 것이든 모든 HTTP 요청은 IP 별 레이트리밋을 지난다 —
+분당 기본 240 건(`LIMCOIN_HTTP_RATE_LIMIT`, `0` 이면 끔) 을 넘기면 429 와
+`Retry-After` 로 답한다.
 
 ### 공개 (읽기)
 | | |
@@ -492,6 +495,8 @@ raw hex 형식은 3.3 이다. 자세한 연동 순서는
 | `LIMCOIN_MINER_THREADS` | 채굴 워커 수 |
 | `LIMCOIN_PEERS` | 뜰 때 붙을 피어, 쉼표 구분 |
 | `LIMCOIN_PUBLIC_URL` | 남이 나에게 걸 수 있는 주소 |
+| `LIMCOIN_HTTP_RATE_LIMIT` | 공개 HTTP 분당 요청 상한(기본 240). `0` 이면 끔 |
+| `LIMCOIN_TRUST_PROXY` | 프록시 뒤에서 진짜 클라이언트 IP 를 믿는다(express `trust proxy`) |
 | `LIMCOIN_MAX_REORG_DEPTH` | 되감기 상한(기본 100). `0` 이면 상한 없음 |
 | `LIMCOIN_MAX_MEMPOOL_BYTES` | mempool 바이트 상한(기본 5,000,000) |
 | `LIMCOIN_MAX_MEMPOOL_TXS` | mempool 건수 상한(기본 5000) |

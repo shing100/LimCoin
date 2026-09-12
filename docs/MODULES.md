@@ -61,7 +61,7 @@
 익스플로러는 피어인 척 붙어 `BLOCKCHAIN_RESPONSE` 와 `MEMPOOL_RESPONSE` 만 듣는다.
 
 ### server.js
-`start(port)` 로 HTTP + P2P 서버를 띄운다. `node src/server.js` 로 직접 실행하면 자동으로 뜬다.
+`start(port)` 로 HTTP + P2P 서버를 띄운다. `node src/server.js` 로 직접 실행하면 자동으로 뜬다. 모든 요청은 IP 별 레이트리밋(src/rateLimit.js) 을 먼저 지난다.
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
@@ -116,6 +116,15 @@
 | GET  | `/me/mnemonic` | 백업용 니모닉 🔒 |
 | POST | `/me/restore` | 니모닉으로 지갑 복구 🔒 |
 
+
+### rateLimit.js
+공개 HTTP API 의 IP 별 토큰버킷 레이트리밋. P2P 쪽에는 속도 제한과 밴이
+있는데 공개 HTTP 는 맨이었던 것을 메운다. 분당 기본 240 건
+(`LIMCOIN_HTTP_RATE_LIMIT`, `0` 이면 끔) 을 넘기면 429 와 `Retry-After` 를
+내린다. 루프백은 세지 않는다 — 로컬 도구와 테스트를 막을 이유가 없고,
+프록시 뒤에서는 server.js 가 `LIMCOIN_TRUST_PROXY` 로 trust proxy 를 켜
+진짜 클라이언트 IP 로 센다. 기억하는 IP 는 10,000 개 상한이고, 두 창 동안
+조용한 IP 는 걷어 낸다.
 
 ### transactions.js
 트랜잭션 자료형과 검증, 합의 상수가 함께 산다.

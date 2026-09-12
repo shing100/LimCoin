@@ -1,5 +1,3 @@
-const _ = require("lodash");
-
 const Keys = require("./keys");
 const Address = require("./address");
 const Params = require("./params");
@@ -529,18 +527,18 @@ const createCoinbaseTx = (address, blockIndex, totalFees = 0) => {
 };
 
 const hasDuplicates = txIns => {
-  const groups = _.countBy(txIns, txIn => txIn.txOutId + txIn.txOutIndex);
+  const seen = new Set();
 
-  return _(groups)
-    .map(value => {
-      if (value > 1) {
-        console.log("Found a duplicated txIn");
-        return true;
-      } else {
-        return false;
-      }
-    })
-    .includes(true);
+  for (const txIn of txIns) {
+    const key = txIn.txOutId + txIn.txOutIndex;
+    if (seen.has(key)) {
+      console.log("Found a duplicated txIn");
+      return true;
+    }
+    seen.add(key);
+  }
+
+  return false;
 };
 
 /*
@@ -599,10 +597,7 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex, mtp) => {
     return false;
   }
 
-  const txIns = _(txs)
-    .map(tx => tx.txIns)
-    .flatten()
-    .value();
+  const txIns = txs.flatMap(tx => tx.txIns);
 
   if (hasDuplicates(txIns)) {
     console.log("Found duplicated txIns");
@@ -615,7 +610,7 @@ const validateBlockTxs = (txs, uTxOutList, blockIndex, mtp) => {
    * 집합이 같은 머클 루트를 갖게 만들 수 있다(비트코인 CVE-2012-2459).
    * 위의 txIn 중복 검사로도 대부분 걸리지만 명시적으로 막아 둔다.
    */
-  if (_.uniqBy(txs, tx => tx.id).length !== txs.length) {
+  if (new Set(txs.map(tx => tx.id)).size !== txs.length) {
     console.log("Found duplicated tx ids");
     return false;
   }

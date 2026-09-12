@@ -1,5 +1,5 @@
 const express = require("express"),
-    bodyParser = require("body-parser"),
+    RateLimit = require("./rateLimit"),
     cors = require("cors"),
     morgan = require("morgan"),
     Blockchain = require("./blockchain"),
@@ -61,7 +61,14 @@ const WALLET_TOKEN =
 const AUTH_DISABLED = WALLET_TOKEN === "none";
 
 const app = express();
-app.use(bodyParser.json({ limit: "1mb" }));
+
+// 리버스 프록시 뒤에서는 X-Forwarded-For 의 진짜 클라이언트 IP 로 레이트리밋을
+// 세야 한다. LIMCOIN_TRUST_PROXY 는 express 의 trust proxy 값에 그대로 간다.
+if (process.env.LIMCOIN_TRUST_PROXY) {
+  app.set("trust proxy", process.env.LIMCOIN_TRUST_PROXY);
+}
+app.use(RateLimit.middleware());
+app.use(express.json({ limit: "1mb" }));
 app.use(morgan("combined"));
 
 // X-Total-Count 는 단순 응답 헤더가 아니라서, 명시적으로 노출하지 않으면

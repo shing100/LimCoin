@@ -37,6 +37,18 @@
 - **린트·커버리지·CI**. `yarn lint` / `yarn coverage` / `yarn fuzz`.
   GitHub Actions 가 Node 20·22·24 에서 돌리고 컨테이너까지 띄워 본다.
 - SECURITY.md, CONTRIBUTING.md, 이 파일.
+- **공개 HTTP API 레이트리밋** (`src/rateLimit.js`). P2P 쪽에는 속도 제한과
+  밴이 있는데 공개 HTTP 는 맨이었다. IP 별 토큰버킷으로 분당 기본 240 건을
+  세고, 넘치면 429 와 `Retry-After` 를 내린다. 루프백은 세지 않는다.
+  `LIMCOIN_HTTP_RATE_LIMIT`(분당 상한, `0` 이면 끔)·`LIMCOIN_TRUST_PROXY`
+  (프록시 뒤에서 진짜 클라이언트 IP 를 믿는다)로 조정한다.
+
+### 변경
+
+- **의존성 경량화** — `body-parser` 는 express 내장 `express.json()` 으로,
+  `lodash` 는 기본 자료구조(`Set`·`flatMap`)로 갈아 넣어 지웠다. `ws` 5 → 8.
+  직접 의존성 6 개 → 4 개. 구버전 의존성이 끌던 취약점 11 건(critical 2·
+  high 5) 은 `yarn audit` 실측 0 건이 됐다.
 
 ### 고침
 
